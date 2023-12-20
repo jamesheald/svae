@@ -146,6 +146,19 @@ def sample_lds_dataset(run_params):
 
     return data_dict
 
+def load_pendulum_control_data(run_params):
+
+    import pickle
+    obj = pickle.load(open("pendulum_data.pkl", 'rb'))
+
+    data_dict = {}
+    data_dict["train_data"] = np.array(obj['observations'][:800, :, :])
+    data_dict["train_u"] = np.array(obj['u'][:800, :-1, None])
+    data_dict["val_data"] =  np.array(obj['observations'][800:, :, :])
+    data_dict["val_u"] = np.array(obj['u'][800:, :-1, None])
+
+    return data_dict 
+
 def load_pendulum(run_params, log=False):    
     d = run_params["dataset_params"]
     train_trials = d["train_trials"]

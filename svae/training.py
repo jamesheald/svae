@@ -23,7 +23,7 @@ from svae.networks import PlaNetRecognitionWrapper
 from svae.utils import truncate_singular_values
 from svae.svae import DeepLDS
 
-
+from flax.training.early_stopping import EarlyStopping
 
 # @title Experiment scheduler
 LINE_SEP = "#" * 42
@@ -230,7 +230,7 @@ class Trainer:
 
     def val_epoch(self, key, params, data, target, u):
 
-        batch_size = self.train_params.get("batch_size") or data.shape[0]
+        batch_size = self.train_params.get("val_batch_size") or data.shape[0]
 
         num_batches = data.shape[0] // batch_size
 
@@ -261,8 +261,11 @@ class Trainer:
     def train(self, data_dict, max_iters, 
               callback=None, val_callback=None, 
               summary=None, key=None,
+              min_delta=1e-3, patience=2,
               early_stop_start=10000, 
               max_lose_streak=2000):
+
+        early_stop = EarlyStopping(min_delta=min_delta, patience=patience)
 
         if key is None:
             key = jr.PRNGKey(0)
@@ -276,7 +279,7 @@ class Trainer:
         val_targets = data_dict.get("val_targets")
         if (val_targets is None): val_targets = val_targets = val_data
         val_u = data_dict["val_u"]
-        batch_size = self.train_params.get("batch_size") or train_data.shape[0]
+        batch_size = self.train_params.get("train_batch_size") or train_data.shape[0]
         num_batches = train_data.shape[0] // batch_size
 
         init_key, key = jr.split(key, 2)
@@ -334,6 +337,12 @@ class Trainer:
             self.train_losses.append(loss)
             pbar.set_description("LP: {:.3f}".format(loss))
 
+            # print("A", self.params['prior_params']['A'])
+            # print("B", self.params['prior_params']['B'])
+            # print("Q", self.params['prior_params']['Q'])
+            # print("Q1", self.params['prior_params']['Q1'])
+            # print("m1", self.params['prior_params']['m1'])
+
             if (callback): callback(self, loss_out, data_dict, grads)
 
             if batch_id == num_batches - 1:
@@ -350,13 +359,15 @@ class Trainer:
             else:
                 curr_loss = val_loss
 
+            print("train loss, val_loss:", loss, val_loss)
+
             if itr >= early_stop_start:
                 if best_loss is None or curr_loss < best_loss:
                     best_itr = itr
                     best_loss = curr_loss
-                if curr_loss > best_loss and itr - best_itr > max_lose_streak:
-                    print("Early stopping!")
-                    break
+                # if curr_loss > best_loss and itr - best_itr > max_lose_streak:
+                #     print("Early stopping!")
+                #     break
 
             # Record parameters
             record_params = self.train_params.get("record_params")
@@ -369,6 +380,15 @@ class Trainer:
                 self.train_params["mask_size"] = mask_size
                 train_step = jit(self.train_step)
                 val_step = jit(self.val_step)
+
+            if batch_id == num_batches - 1:
+                # if early stopping criteria met, break
+                _, early_stop = early_stop.update(val_loss)
+                if early_stop.should_stop:
+                    
+                    print('Early stopping criteria met, breaking...')
+                    
+                    break
 
         if summary:
             summary(self, data_dict)

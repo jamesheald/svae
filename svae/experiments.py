@@ -23,7 +23,7 @@ from svae.networks import GaussianRecognition, GaussianBiRNN, TemporalConv, \
     PlaNetRecognitionWrapper
 from svae.training import Trainer, experiment_scheduler, svae_pendulum_val_loss, svae_init, svae_loss, svae_update
 from svae.svae import DeepLDS
-from svae.datasets import sample_lds_dataset, load_nlb, load_pendulum
+from svae.datasets import sample_lds_dataset, load_nlb, load_pendulum, load_pendulum_control_data
 from svae.logging import summarize_pendulum_run, save_params_to_wandb, log_to_wandb, validation_log_to_wandb, on_error
 
 networks = {
@@ -114,7 +114,7 @@ def start_trainer(model_dict, data_dict, run_params):
                   max_iters=run_params["max_iters"],
                   key=run_params["seed"],
                   callback=log_to_wandb, val_callback=validation_log_to_wandb,
-                  summary=summary)
+                  summary=summary, min_delta=run_params["min_delta"], patience=run_params["patience"])
     return (trainer.model, trainer.params, trainer.train_losses)
 
 linear_recnet_architecture = {
@@ -397,6 +397,121 @@ def expand_lds_parameters(params):
     extended_params.update(params)
     return extended_params
 
+def expand_pendulum_control_parameters(params):
+    num_timesteps = params.get("num_timesteps") # or 200
+    # train_trials = { "small": 10, "medium": 100, "large": 1000 }
+    # batch_sizes = {"small": 10, "medium": 10, "large": 10 }
+    # emission_noises = { "small": 10., "medium": 1., "large": .1 }
+    # dynamics_noises = { "small": 0.01, "medium": .1, "large": .1 }
+    # latent_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
+    latent_dims = params.get("latent_dims")
+    # emission_dims = { "small": 5, "medium": 10, "large": 20, "32": 64, "64": 128}
+    emission_dims = params.get("emission_dims")
+    # input_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
+    input_dims = params.get("input_dims")
+    max_iters = params.get("max_iters")
+
+    # Modify all the architectures according to the parameters given
+    # D, H, N = params["latent_dims"], params["rnn_dims"], params["emission_dims"]
+    # D, H, N, C = latent_dims[params["dimensionality"]], params["rnn_dims"], emission_dims[params["dimensionality"]], input_dims[params["dimensionality"]]
+    D, N, C = latent_dims, emission_dims, input_dims
+    inf_params = {}
+    if (params["inference_method"] == "svae"):
+        inf_params["recnet_class"] = "GaussianRecognition"
+        architecture = deepcopy(linear_recnet_architecture)
+        architecture["output_dim"] = D
+        architecture["diagonal_covariance"] = True if params.get("diagonal_covariance") else False
+    elif (params["inference_method"] in ["dkf", "cdkf"]):
+        inf_params["recnet_class"] = "GaussianBiRNN"
+        architectures = {
+            "small": BiRNN_recnet_architecture,
+            "medium": BiRNN_recnet_architecture,
+            "large": BiRNN_recnet_architecture,
+            "32": BiRNN_recnet_architecture_32,
+            "64": BiRNN_recnet_architecture_64,
+        }
+        architecture = deepcopy(architectures[params["dimensionality"]])
+        architecture["output_dim"] = D
+        architecture["rnn_dim"] = H
+    elif (params["inference_method"] == "planet"):
+        # Here we're considering the filtering setting as default
+        # Most likely we're not even going to use this so it should be fine
+        # If we want smoothing then we can probably just replace these with the
+        # BiRNN version
+        inf_params["recnet_class"] = "GaussianBiRNN"
+        architecture = deepcopy(BiRNN_recnet_architecture)
+        architecture["output_dim"] = H
+        architecture["rnn_dim"] = H
+        post_arch = deepcopy(planet_posterior_architecture)
+        post_arch["input_dim"] = H
+        post_arch["rnn_dim"] = H
+        post_arch["output_dim"] = D
+        inf_params["posterior_architecture"] = post_arch
+        inf_params["sample_kl"] = True # PlaNet doesn't have built-in suff-stats
+    elif (params["inference_method"] in ["conv"]):
+        inf_params["recnet_class"] = "TemporalConv"
+        architecture = deepcopy(conv_recnet_architecture)
+        architecture["output_dim"] = D
+        # The output heads will output distributions in D dimensional space
+        architecture["cnn_params"]["output_dim"] = H
+
+        # Change the convolution kernel size
+        kernel_size = params.get("conv_kernel_size") or "medium"
+        kernel_sizes = { "small": 10, "medium": 20, "large": 50 }
+        size = kernel_sizes[kernel_size]
+
+        for layer in architecture["cnn_params"]["layer_params"]:
+            layer["kernel_size"] = (size,)
+    else:
+        print("Inference method not found: " + params["inference_method"])
+        assert(False)
+    decnet_architecture = deepcopy(linear_decnet_architecture)
+    decnet_architecture["output_dim"] = N
+    inf_params["decnet_class"] = "GaussianEmission"
+    inf_params["decnet_architecture"] = decnet_architecture
+    inf_params["recnet_architecture"] = architecture
+
+    lr, prior_lr = get_lr(params, max_iters)
+
+    extended_params = {
+        "project_name": "SVAE-LDS-ICML-RE-1",
+        "log_to_wandb": True,
+        "dataset": "lds",
+        # We're just doing model learning since we're lazy
+        "run_type": "model_learning",
+        "dataset_params": {
+            "seed": key_0,
+            # "num_trials": train_trials[params["dataset_size"]],
+            "num_timesteps": num_timesteps,
+            # "emission_cov": emission_noises[params["snr"]],
+            # "dynamics_cov": dynamics_noises[params["snr"]],
+            "latent_dims": D,
+            "emission_dims": N,
+            "input_dims": C,
+        },
+        # Implementation choice
+        "use_parallel_kf": False,
+        # Training specifics
+        "max_iters": max_iters,
+        "elbo_samples": 1,
+        "sample_kl": False,
+        # "batch_size": batch_sizes[params["dataset_size"]],
+        "train_batch_size": params.get("train_batch_size"),
+        "val_batch_size": params.get("val_batch_size"),
+        "record_params": lambda i: i % 1000 == 0,
+        "plot_interval": 100,
+        "learning_rate": lr, 
+        "prior_learning_rate": prior_lr,
+        "use_validation": True,
+        # Note that we do not specify this in the high-level parameters!
+        "latent_dims": D,
+        "lr_warmup": True
+    }
+    extended_params.update(inf_params)
+    # This allows us to override ANY of the above...!
+    extended_params.update(params)
+    return extended_params
+
 def expand_pendulum_parameters(params):
     train_trials = { "small": 20, "medium": 100, "large": 2000 }
     batch_sizes = {"small": 10, "medium": 10, "large": 40 }
@@ -616,6 +731,20 @@ def run_lds(run_params, run_variations=None):
                      model_getter=init_model, 
                      train_func=start_trainer,
                      params_expander=expand_lds_parameters,
+                     on_error=on_error)
+    wandb.finish()
+    return results
+
+def run_pendulum_control(run_params, run_variations=None):
+    jax.config.update("jax_debug_nans", True)
+    load_lds = load_pendulum_control_data
+
+    results = experiment_scheduler(run_params, 
+                     run_variations=run_variations,
+                     dataset_getter=load_lds, 
+                     model_getter=init_model, 
+                     train_func=start_trainer,
+                     params_expander=expand_pendulum_control_parameters,
                      on_error=on_error)
     wandb.finish()
     return results
