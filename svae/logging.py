@@ -19,7 +19,7 @@ import pickle as pkl
 import numpy as onp
 
 from svae.distributions import LinearGaussianChain
-from svae.utils import lie_params_to_constrained
+from svae.utils import lie_params_to_constrained, construct_dynamics_matrix
 
 def visualize_pendulum(trainer, aux):
     # This assumes single sequence has shape (100, 24, 24, 1)
@@ -55,8 +55,7 @@ def get_group_name(run_params):
     elif p["dataset"] == "lds":
         d = p["dataset_params"]
         dataset_summary = "lds_dims_{}_{}_noises_{}_{}".format(
-            d["latent_dims"], d["emission_dims"], 
-            d["dynamics_cov"], d["emission_cov"])
+            d["latent_dims"], d["emission_dims"], d["input_dims"])
     elif p["dataset"] == "nlb":
         dataset_summary = "nlb"
     else:
@@ -126,7 +125,7 @@ def log_to_wandb(trainer, loss_out, data_dict, grads):
     itr = len(trainer.train_losses) - 1
     if len(trainer.train_losses) == 1:
         wandb.init(project=project_name, group=group_name, config=p,    
-            dir="/scratch/users/yixiuz/")
+            dir=p.get("save_dir"))
         pprint(p)
 
     obj, aux = loss_out
@@ -143,7 +142,7 @@ def log_to_wandb(trainer, loss_out, data_dict, grads):
         A = prior_params["A"]
     else:
         Q = lie_params_to_constrained(prior_params["Q"], D)
-        A = prior_params["A"]
+        A = construct_dynamics_matrix(prior_params["A_u"], prior_params["A_v"], prior_params["A_s"], D)
 
     eigs = eigh(Q)[0]
     Q_cond_num = np.max(eigs) / np.min(eigs)
@@ -167,7 +166,7 @@ def log_to_wandb(trainer, loss_out, data_dict, grads):
             visualizations = visualize_pendulum(trainer, aux)
 
         fig = plt.figure()
-        prior_sample = prior.sample(prior_params, shape=(1,), key=jr.PRNGKey(0))[0]
+        prior_sample = prior.sample(prior_params, data_dict["val_u"][0, :], shape=(1,), key=jr.PRNGKey(0))[0]
         plt.plot(prior_sample)
         fig.canvas.draw()
         img = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())

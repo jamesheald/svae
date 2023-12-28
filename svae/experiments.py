@@ -81,7 +81,7 @@ def init_model(run_params, data_dict):
         posterior=posterior,
         input_dummy=np.zeros(input_shape),
         latent_dummy=np.zeros((num_timesteps, latent_dims)),
-        u_dummy=np.zeros((num_timesteps - 1, p["dataset_params"]["input_dims"]))
+        u_dummy=np.zeros((num_timesteps, p["dataset_params"]["input_dims"]))
     )
 
     initial_params = None
@@ -110,12 +110,31 @@ def start_trainer(model_dict, data_dict, run_params):
             summary = save_params_to_wandb
     else:
         summary = None
-    trainer.train(data_dict,
+    trainer.train(data_dict, run_params["run_type"],
                   max_iters=run_params["max_iters"],
                   key=run_params["seed"],
                   callback=log_to_wandb, val_callback=validation_log_to_wandb,
                   summary=summary, min_delta=run_params["min_delta"], patience=run_params["patience"])
-    return (trainer.model, trainer.params, trainer.train_losses)
+    return (trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.opts, trainer.opt_states, trainer.mngr)
+
+MLP_recnet_architecture = {
+    "diagonal_covariance": False,
+    "input_rank": 1,
+    "head_mean_params": { "features": [] },
+    "head_var_params": { "features": [] },
+    "eps": 1e-4,
+    "cov_init": 1,
+}
+
+MLP_decnet_architecture = {
+    "diagonal_covariance": True,
+    "input_rank": 1,
+    "head_mean_params": { "features": [] },
+    "head_var_params": { "features": [] },
+    "eps": 1e-4,
+    "cov_init": 1,
+}
+
 
 linear_recnet_architecture = {
     "diagonal_covariance": False,
@@ -271,22 +290,23 @@ def get_lr(params, max_iters):
         if params["prior_lr_warmup"]: 
             prior_lr = opt.linear_schedule(0, prior_base_lr, .2 * max_iters, 0)
     # Always use learning rate warm-up for stability in initial training
-    warmup_end = 200
-    lr_warmup = opt.linear_schedule(0, base_lr, warmup_end, 0)
-    lr = opt.join_schedules([lr_warmup, lr], [warmup_end])
+    # warmup_end = 200
+    # lr_warmup = opt.linear_schedule(0, base_lr, warmup_end, 0)
+    # lr = opt.join_schedules([lr_warmup, lr], [warmup_end])
     return lr, prior_lr
 
-def get_beta_schedule(params, max_iters):
-    if params.get("beta_schedule"):
-        if params["beta_schedule"] == "linear_fast":
-            return opt.linear_schedule(0., 1., 1000, 0)
-        elif params["beta_schedule"] == "linear_slow":
-            return opt.linear_schedule(0., 1., 5000, 1000)
-        else:
-            print("Beta schedule undefined! Using constant instead.")
-            return lambda _: 1.0
-    else:
-        return lambda _: 1.0
+def get_beta_schedule(params):
+    return opt.linear_schedule(0., 1., params.get("beta_transition_steps"), params.get("beta_transition_begin"))
+    # if params.get("beta_schedule"):
+    #     if params["beta_schedule"] == "linear_fast":
+    #         return opt.linear_schedule(0., 1., 1000, 0)
+    #     elif params["beta_schedule"] == "linear_slow":
+    #         return opt.linear_schedule(0., 1., 5000, 1000)
+    #     else:
+    #         print("Beta schedule undefined! Using constant instead.")
+    #         return lambda _: 1.0
+    # else:
+    #     return lambda _: 1.0
 
 def expand_lds_parameters(params):
     num_timesteps = params.get("num_timesteps") or 200
@@ -418,8 +438,10 @@ def expand_pendulum_control_parameters(params):
     inf_params = {}
     if (params["inference_method"] == "svae"):
         inf_params["recnet_class"] = "GaussianRecognition"
-        architecture = deepcopy(linear_recnet_architecture)
+        architecture = deepcopy(MLP_recnet_architecture)
         architecture["output_dim"] = D
+        architecture["head_mean_params"] = { "features": deepcopy(params.get("rec_features")) }
+        architecture["head_var_params"] = { "features": deepcopy(params.get("rec_features")) }
         architecture["diagonal_covariance"] = True if params.get("diagonal_covariance") else False
     elif (params["inference_method"] in ["dkf", "cdkf"]):
         inf_params["recnet_class"] = "GaussianBiRNN"
@@ -465,8 +487,10 @@ def expand_pendulum_control_parameters(params):
     else:
         print("Inference method not found: " + params["inference_method"])
         assert(False)
-    decnet_architecture = deepcopy(linear_decnet_architecture)
+    decnet_architecture = deepcopy(MLP_decnet_architecture)
     decnet_architecture["output_dim"] = N
+    decnet_architecture["head_mean_params"] = { "features": deepcopy(params.get("dec_features")) }
+    decnet_architecture["head_var_params"] = { "features": deepcopy(params.get("dec_features")) }
     inf_params["decnet_class"] = "GaussianEmission"
     inf_params["decnet_architecture"] = decnet_architecture
     inf_params["recnet_architecture"] = architecture
@@ -474,9 +498,9 @@ def expand_pendulum_control_parameters(params):
     lr, prior_lr = get_lr(params, max_iters)
 
     extended_params = {
-        "project_name": "SVAE-LDS-ICML-RE-1",
+        "project_name": params.get("project_name"),
         "log_to_wandb": True,
-        "dataset": "lds",
+        "dataset": "pendulum_control",
         # We're just doing model learning since we're lazy
         "run_type": "model_learning",
         "dataset_params": {
@@ -500,12 +524,14 @@ def expand_pendulum_control_parameters(params):
         "val_batch_size": params.get("val_batch_size"),
         "record_params": lambda i: i % 1000 == 0,
         "plot_interval": 100,
+        "mask_type": "potential" if params["inference_method"] == "svae" else "data",
         "learning_rate": lr, 
         "prior_learning_rate": prior_lr,
         "use_validation": True,
         # Note that we do not specify this in the high-level parameters!
         "latent_dims": D,
-        "lr_warmup": True
+        "lr_warmup": True,
+        "beta": get_beta_schedule(params),
     }
     extended_params.update(inf_params)
     # This allows us to override ANY of the above...!
@@ -712,7 +738,7 @@ def expand_nlb_parameters(params):
         "prior_learning_rate": prior_lr,
         "use_validation": True,
         "constrain_dynamics": True,
-        "beta": get_beta_schedule(params, max_iters),
+        "beta": get_beta_schedule(params),
         "init_dynamics_noise_scale": 1e-4,
         "lr_warmup": True
     }

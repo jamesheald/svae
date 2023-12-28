@@ -36,7 +36,8 @@ class LinearGaussianChain:
     @classmethod
     def from_stationary_dynamics(cls, m1, Q1, A, B, u, Q, T):
         dynamics_matrix = np.tile(A[None], (T, 1, 1))
-        dynamics_bias = np.concatenate([m1[None], u @ B.T])
+        dynamics_bias = np.concatenate([m1[None], u[:-1] @ B.T])
+        # dynamics_bias = np.concatenate([m1[None], np.tile(np.zeros(3,), (T - 1, 1))])
         noise_covariance = np.concatenate([Q1[None],
                                            np.tile(Q[None], (T - 1, 1, 1))])
         return cls.from_nonstationary_dynamics(dynamics_matrix, dynamics_bias, noise_covariance)
@@ -100,7 +101,7 @@ class LinearGaussianChain:
 
     # Only supports 0d and 1d sample shapes
     # Does not support sampling with batched object
-    def sample(self, seed, sample_shape=()):
+    def sample(self, u, seed, sample_shape=()):
 
         @partial(np.vectorize, signature="(n),(t,d,d),(t,d),(t,d,d)->(t,d)")
         def sample_single(key, A, b, Q):
@@ -162,7 +163,7 @@ class LinearGaussianSSM(tfd.Distribution):
                  initial_mean,
                  initial_covariance,
                  dynamics_matrix,
-                 dynamics_bias,
+                 input_matrix,
                  dynamics_noise_covariance,
                  emissions_means,
                  emissions_covariances,
@@ -180,7 +181,7 @@ class LinearGaussianSSM(tfd.Distribution):
         self._initial_mean = initial_mean
         self._initial_covariance = initial_covariance
         self._dynamics_matrix = dynamics_matrix
-        self._dynamics_bias = dynamics_bias
+        self._input_matrix = input_matrix
         self._dynamics_noise_covariance = dynamics_noise_covariance
         # Emissions
         self._emissions_means = emissions_means
@@ -201,11 +202,11 @@ class LinearGaussianSSM(tfd.Distribution):
             dtype=dtype,
             validate_args=validate_args,
             allow_nan_stats=allow_nan_stats,
-            reparameterization_type=reparameterization.NOT_REPARAMETERIZED,
+            reparameterization_type=reparameterization.FULLY_REPARAMETERIZED,
             parameters=dict(initial_mean=self._initial_mean,
                             initial_covariance=self._initial_covariance,
                             dynamics_matrix=self._dynamics_matrix,
-                            dynamics_bias=self._dynamics_bias,
+                            input_matrix=self._input_matrix,
                             dynamics_noise_covariance=self._dynamics_noise_covariance,
                             emissions_means=self._emissions_means,
                             emissions_covariances=self._emissions_covariances,
@@ -224,7 +225,7 @@ class LinearGaussianSSM(tfd.Distribution):
         return dict(initial_mean=tfp.internal.parameter_properties.ParameterProperties(event_ndims=1),
                     initial_covariance=tfp.internal.parameter_properties.ParameterProperties(event_ndims=2),
                     dynamics_matrix=tfp.internal.parameter_properties.ParameterProperties(event_ndims=2),
-                    dynamics_bias=tfp.internal.parameter_properties.ParameterProperties(event_ndims=1),
+                    input_matrix=tfp.internal.parameter_properties.ParameterProperties(event_ndims=1),
                     dynamics_noise_covariance=tfp.internal.parameter_properties.ParameterProperties(event_ndims=2),
                     emissions_means=tfp.internal.parameter_properties.ParameterProperties(event_ndims=2),
                     emissions_covariances=tfp.internal.parameter_properties.ParameterProperties(event_ndims=3),
@@ -247,21 +248,7 @@ class LinearGaussianSSM(tfd.Distribution):
 
         params = make_lgssm_params(p["m1"], p["Q1"], p["A"], p["Q"], C, Sigmas,
                                    dynamics_input_weights=p["B"], emissions_bias=d)
-
         smoothed = lgssm_smoother(params, mus, u)._asdict()
-
-        # Compute ExxT
-        A, Q = dynamics_params["A"], dynamics_params["Q"]
-        filtered_cov = smoothed["filtered_covariances"]
-        filtered_mean = smoothed["smoothed_means"]
-        smoothed_cov = smoothed["smoothed_covariances"]
-        smoothed_mean = smoothed["smoothed_means"]
-        G = vmap(lambda C: psd_solve(Q + A @ C @ A.T, A @ C).T)(filtered_cov)
-
-        # Compute the smoothed expectation of z_t z_{t+1}^T
-        smoothed_cross = vmap(
-            lambda Gt, mean, next_mean, next_cov: Gt @ next_cov + np.outer(mean, next_mean)) \
-            (G[:-1], smoothed_mean[:-1], smoothed_mean[1:], smoothed_cov[1:])
 
         log_Z = lgssm_log_normalizer(dynamics_params,
                                      smoothed["filtered_means"],
@@ -276,12 +263,12 @@ class LinearGaussianSSM(tfd.Distribution):
                    dynamics_params["Q"],
                    emissions_potentials["mu"],
                    emissions_potentials["Sigma"],
-                   log_Z,  # smoothed["marginal_loglik"],
+                   log_Z,
                    smoothed["filtered_means"],
                    smoothed["filtered_covariances"],
                    smoothed["smoothed_means"],
                    smoothed["smoothed_covariances"],
-                   smoothed_cross)
+                   smoothed['smoothed_cross_covariances'])
 
     # Properties to get private class variables
     @property
@@ -326,8 +313,9 @@ class LinearGaussianSSM(tfd.Distribution):
         return self.smoothed_covariances
 
     # TODO: currently this function does not depend on the dynamics bias
-    def _log_prob(self, data, **kwargs):
+    def _log_prob(self, data, u, **kwargs):
         A = self._dynamics_matrix  # params["A"]
+        B = self._input_matrix  # params["B"]
         Q = self._dynamics_noise_covariance  # params["Q"]
         Q1 = self._initial_covariance  # params["Q1"]
         m1 = self._initial_mean  # params["m1"]
@@ -335,7 +323,7 @@ class LinearGaussianSSM(tfd.Distribution):
         num_batch_dims = len(data.shape) - 2
 
         ll = np.sum(
-            MVN(loc=np.einsum("ij,...tj->...ti", A, data[..., :-1, :]),
+            MVN(loc=np.einsum("ij,...tj->...ti", A, data[..., :-1, :]) + np.einsum("ij,...tj->...ti", B, u[..., :-1, :]),
                 covariance_matrix=Q).log_prob(data[..., 1:, :])
         )
         ll += MVN(loc=m1, covariance_matrix=Q1).log_prob(data[..., 0, :])
@@ -350,10 +338,10 @@ class LinearGaussianSSM(tfd.Distribution):
 
         return ll
 
-    def _sample_n(self, n, seed=None):
+    def _sample_n(self, n, u, seed=None):
 
         F = self._dynamics_matrix
-        b = self._dynamics_bias
+        B = self._input_matrix
         Q = self._dynamics_noise_covariance
 
         def sample_single(
@@ -363,7 +351,7 @@ class LinearGaussianSSM(tfd.Distribution):
         ):
 
             initial_elements = _make_associative_sampling_elements(
-                {"A": F, "b": b, "Q": Q}, key, filtered_means, filtered_covariances)
+                {"A": F, "B": B, "U": u, "Q": Q}, key, filtered_means, filtered_covariances)
 
             @vmap
             def sampling_operator(elem1, elem2):
@@ -373,7 +361,6 @@ class LinearGaussianSSM(tfd.Distribution):
                 E = E2 @ E1
                 h = E2 @ h1 + h2
                 return E, h
-
             _, sample = \
                 lax.associative_scan(sampling_operator, initial_elements, reverse=True)
 
@@ -390,9 +377,10 @@ class LinearGaussianSSM(tfd.Distribution):
             # non-batch mode
             samples = vmap(sample_single, in_axes=(0, None, None)) \
                 (jr.split(seed, n), self._filtered_means, self._filtered_covariances)
+
         return samples
 
-    def _entropy(self):
+    def _entropy(self, u):
         """
         Compute the entropy
 
@@ -408,7 +396,7 @@ class LinearGaussianSSM(tfd.Distribution):
                 "m1": self._initial_mean,
                 "Q1": self._initial_covariance,
                 "A": self._dynamics_matrix,
-                # "b": self._dynamics_bias,
+                "B": self._input_matrix,
                 "Q": self._dynamics_noise_covariance,
             }, Ex.shape[0], Ex.shape[1]
         )
@@ -416,11 +404,11 @@ class LinearGaussianSSM(tfd.Distribution):
         J_lower_diag = p["L"]
 
         Sigmatt = ExxT - np.einsum("ti,tj->tij", Ex, Ex)
-        Sigmatnt = ExnxT - np.einsum("ti,tj->tji", Ex[:-1], Ex[1:])
+        Sigmatnt = ExnxT.transpose((0, 2, 1)) - np.einsum("ti,tj->tji", Ex[:-1], Ex[1:])
 
         entropy = 0.5 * np.sum(J_diag * Sigmatt)
         entropy += np.sum(J_lower_diag * Sigmatnt)
-        return entropy - self.log_prob(Ex)
+        return entropy - self.log_prob(Ex, u=u)
 
 
 class ParallelLinearGaussianSSM(LinearGaussianSSM):
@@ -460,11 +448,11 @@ class ParallelLinearGaussianSSM(LinearGaussianSSM):
         return cls(dynamics_params["m1"],
                    dynamics_params["Q1"],
                    dynamics_params["A"],
-                   dynamics_params["b"],
+                   dynamics_params["B"],
                    dynamics_params["Q"],
                    emissions_potentials["mu"],
                    emissions_potentials["Sigma"],
-                   log_Z,  # smoothed["marginal_loglik"],
+                   log_Z,
                    smoothed["filtered_means"],
                    smoothed["filtered_covariances"],
                    smoothed["smoothed_means"],

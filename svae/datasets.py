@@ -7,7 +7,7 @@ from flax.core import frozen_dict as fd
 
 import tensorflow_probability.substrates.jax.distributions as tfd
 
-from svae.utils import random_rotation
+# from svae.utils import random_rotation
 from svae.priors import LinearGaussianChainPrior
 from svae.posteriors import LDSSVAEPosterior
 
@@ -113,7 +113,6 @@ def sample_lds_dataset(run_params):
 
     u = jr.normal(seed_u, shape=(num_trials, num_timesteps - 1, input_dims))
 
-    # constrained = vmap(lds.get_constrained_params, in_axes = (None, 0))(params, u)
     # constrained = lds.get_constrained_params
 
     # params["avg_suff_stats"] = { "Ex": constrained["Ex"], 
@@ -146,16 +145,39 @@ def sample_lds_dataset(run_params):
 
     return data_dict
 
+def normalise(t, t_min, t_max):
+
+    return (t - t_min) / (t_max - t_min) - 0.5
+
+def unnormalise(t, t_min, t_max):
+
+    return t_min + t * (t_max - t_min) - 0.5
+
 def load_pendulum_control_data(run_params):
 
     import pickle
     obj = pickle.load(open("pendulum_data.pkl", 'rb'))
 
+    sigma = 0
+    # N_train = 800
+    # N_val = 200
+    N_train = 10
+    N_val = 10
+
     data_dict = {}
-    data_dict["train_data"] = np.array(obj['observations'][:800, :, :])
-    data_dict["train_u"] = np.array(obj['u'][:800, :-1, None])
-    data_dict["val_data"] =  np.array(obj['observations'][800:, :, :])
-    data_dict["val_u"] = np.array(obj['u'][800:, :-1, None])
+    data_dict["train_data"] = np.array(obj['observations'][:N_train, :, :])
+    data_dict["train_data"] += jr.normal(jr.PRNGKey(0), data_dict["train_data"].shape) * sigma
+    data_dict["train_u"] = np.array(obj['u'][:N_train, :, None])
+    data_dict["train_u"] += jr.normal(jr.PRNGKey(1), data_dict["train_u"].shape) * sigma
+    data_dict["val_data"] =  np.array(obj['observations'][-N_val:, :, :])
+    data_dict["val_data"] += jr.normal(jr.PRNGKey(2), data_dict["val_data"].shape) * sigma
+    data_dict["val_u"] = np.array(obj['u'][-N_val:, :, None])
+    data_dict["val_u"] += jr.normal(jr.PRNGKey(3), data_dict["val_u"].shape) * sigma
+
+    data_dict["train_data"] = normalise(data_dict["train_data"], np.min(obj['observations'], axis = (0, 1)), np.max(obj['observations'], axis = (0, 1)))
+    data_dict["train_u"] = normalise(data_dict["train_u"], np.min(obj['u'], axis = (0, 1)), np.max(obj['u'], axis = (0, 1)))
+    data_dict["val_data"] = normalise(data_dict["val_data"], np.min(obj['observations'], axis = (0, 1)), np.max(obj['observations'], axis = (0, 1)))
+    data_dict["val_u"] = normalise(data_dict["val_u"], np.min(obj['u'], axis = (0, 1)), np.max(obj['u'], axis = (0, 1)))
 
     return data_dict 
 

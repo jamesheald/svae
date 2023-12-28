@@ -5,7 +5,8 @@ import copy
 
 from svae.priors import SVAEPrior, LinearGaussianChainPrior
 from svae.distributions import ParallelLinearGaussianSSM, LinearGaussianSSM, LinearGaussianChain
-from svae.utils import random_rotation
+# from svae.utils import random_rotation
+from svae.utils import construct_dynamics_matrix
 
 class LDSSVAEPosterior(SVAEPrior):
     def __init__(self, latent_dims, input_dims, seq_len, use_parallel=False):
@@ -31,16 +32,19 @@ class LDSSVAEPosterior(SVAEPrior):
 
     def init(self, key, u):
         T, D, U = self.seq_len, self.latent_dims, self.input_dims
-        key_A, key = jr.split(key, 2)
+        key_A_u, key_A_v, key_A_s = jr.split(key, 3)
         p = {
             "m1": np.zeros(D),
             "Q1": np.eye(D),
-            "A": random_rotation(key_A, D, theta=np.pi/20),
+            "A_u": jr.normal(key_A_u, (D, D)),
+            "A_v": jr.normal(key_A_v, (D, D)),
+            "A_s": jr.normal(key_A_s, (D,)),
             "B": np.ones((D, U)),
             "Q": np.eye(D),
             "Sigma": np.tile(np.eye(D)[None], (T, 1, 1)),
             "mu": np.zeros((T, D))
         }
+        p.update({"A": construct_dynamics_matrix(p["A_u"], p["A_v"], p["A_s"], self.latent_dims)})
 
         dist = self.dist.infer_from_dynamics_and_potential(p, 
                                     {"mu": p["mu"], "Sigma": p["Sigma"]}, u)

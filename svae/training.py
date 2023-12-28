@@ -20,10 +20,12 @@ from svae.logging import summarize_pendulum_run, predict_multiple, save_params_t
 from svae.posteriors import DKFPosterior, CDKFPosterior, LDSSVAEPosterior, PlaNetPosterior
 from svae.priors import LinearGaussianChainPrior, LieParameterizedLinearGaussianChainPrior
 from svae.networks import PlaNetRecognitionWrapper
-from svae.utils import truncate_singular_values
+from svae.utils import truncate_singular_values, get_train_state
 from svae.svae import DeepLDS
 
 from flax.training.early_stopping import EarlyStopping
+from flax.training.orbax_utils import save_args_from_target
+from orbax.checkpoint import SaveArgs
 
 # @title Experiment scheduler
 LINE_SEP = "#" * 42
@@ -258,7 +260,7 @@ class Trainer:
     Callback: a function that takes training iterations and relevant parameter
         And logs to WandB
     """
-    def train(self, data_dict, max_iters, 
+    def train(self, data_dict, run_type, max_iters, 
               callback=None, val_callback=None, 
               summary=None, key=None,
               min_delta=1e-3, patience=2,
@@ -285,113 +287,153 @@ class Trainer:
         init_key, key = jr.split(key, 2)
 
         # Initialize optimizer
-        self.params, self.opts, self.opt_states = self.init(init_key, model, 
-                                                       train_data[:batch_size],
-                                                       self.params,
-                                                       **self.train_params)
+        self.params, self.opts, self.opt_states, self.mngr = self.init(init_key, model, 
+                                                                  train_data[:batch_size],
+                                                                  self.params,
+                                                                  **self.train_params)
+
         self.train_losses = []
         self.test_losses = []
         self.val_losses = []
         self.past_params = []
 
-        pbar = trange(max_iters)
-        pbar.set_description("[jit compling...]")
-        
-        mask_start = self.train_params.get("mask_start")
-        if (mask_start):
-            mask_size = self.train_params["mask_size"]
-            self.train_params["mask_size"] = 0
+        if run_type== "model_learning":
 
-        train_step = jit(self.train_step)
-        self.val_step_jitted = jit(self.val_step)
+            pbar = trange(max_iters)
+            pbar.set_description("[jit compling...]")
+            
+            mask_start = self.train_params.get("mask_start")
+            if (mask_start):
+                mask_size = self.train_params["mask_size"]
+                self.train_params["mask_size"] = 0
 
-        best_loss = None
-        best_itr = 0
-        val_loss = None
+            train_step = jit(self.train_step)
+            self.val_step_jitted = jit(self.val_step)
 
-        indices = np.arange(train_data.shape[0], dtype=int)
+            best_loss = None
+            best_itr = 0
+            val_loss = None
 
-        for itr in pbar:
-            train_key, val_key, key = jr.split(key, 3)
+            indices = np.arange(train_data.shape[0], dtype=int)
 
-            batch_id = itr % num_batches
-            batch_start = batch_id * batch_size
+            for itr in pbar:
+                train_key, val_key, key = jr.split(key, 3)
 
-            # Uncomment this to time the execution
-            # t = time()
-            # Training step
-            # ----------------------------------------
-            batch_indices = indices[batch_start:batch_start+batch_size]
-            step_results = train_step(train_key, self.params, 
-                           train_data[batch_indices],
-                           train_targets[batch_indices], 
-                           train_u[batch_indices], 
-                           self.opt_states, itr)
-            self.params, self.opt_states, loss_out, grads = step_results#\
-                # jax.tree_map(lambda x: x.block_until_ready(), step_results)
-            # ----------------------------------------
-            # dt = time() - t
-            # self.time_spent.append(dt)
+                batch_id = itr % num_batches
+                batch_start = batch_id * batch_size
+                epoch = itr // num_batches
 
-            loss, aux = loss_out
-            self.train_losses.append(loss)
-            pbar.set_description("LP: {:.3f}".format(loss))
+                # Uncomment this to time the execution
+                # t = time()
+                # Training step
+                # ----------------------------------------
+                batch_indices = indices[batch_start:batch_start+batch_size]
+                step_results = train_step(train_key, self.params, 
+                               train_data[batch_indices],
+                               train_targets[batch_indices], 
+                               train_u[batch_indices], 
+                               self.opt_states, itr)
+                self.params, self.opt_states, loss_out, grads = step_results#\
+                    # jax.tree_map(lambda x: x.block_until_ready(), step_results)
+                # ----------------------------------------
+                # dt = time() - t
+                # self.time_spent.append(dt)
 
-            # print("A", self.params['prior_params']['A'])
-            # print("B", self.params['prior_params']['B'])
-            # print("Q", self.params['prior_params']['Q'])
-            # print("Q1", self.params['prior_params']['Q1'])
-            # print("m1", self.params['prior_params']['m1'])
+                loss, aux = loss_out
 
-            if (callback): callback(self, loss_out, data_dict, grads)
+                # cov_diag = vmap(vmap(lambda x: np.diag(x)))(aux['cov'][:,0,:,:])
+                # min_cov_idx = np.unravel_index(cov_diag.argmin(), cov_diag.shape)
+                # print("min cov", cov_diag.min())
+                # print("min cov episode", min_cov_idx[0])
+                # print("min cov time point", min_cov_idx[1])
+                # print("min cov dim", min_cov_idx[2])
+                # print("kl mean", aux['kl'].mean())
+                # print("min kl", aux['kl'].min())
+                # print("min kl episode", aux['kl'].argmin())
+                # max_ells = np.unravel_index(aux['ells'][:, 0, :].argmax(), aux['ells'].shape)
+                # print("max ells", aux['ells'][:, 0, :].max())
+                # print("max ells episode", max_ells[0])
+                # print("max ells time point", max_ells[1])
 
-            if batch_id == num_batches - 1:
-                # We're at the end of an epoch
-                # We could randomly shuffle the data
-                indices = jr.permutation(key, indices)
-                if (self.train_params.get("use_validation")):
-                    val_loss_out = self.val_epoch(val_key, self.params, val_data, val_targets, val_u)
-                    if (val_callback): val_callback(self, val_loss_out, data_dict)
-                    val_loss, _ = val_loss_out
-                    
-            if not self.train_params.get("use_validation") or val_loss is None:
-                curr_loss = loss
-            else:
-                curr_loss = val_loss
+                # print("A", self.params['prior_params']['A'])
+                # print("B", self.params['prior_params']['B'])
+                # print("Q", self.params['prior_params']['Q'])
+                # print("Q1", self.params['prior_params']['Q1'])
+                # print("m1", self.params['prior_params']['m1'])
 
-            print("train loss, val_loss:", loss, val_loss)
+                self.train_losses.append(loss)
+                if epoch == 0:
+                    pbar.set_description("train loss: {:.3f}".format(loss))
+                else:
+                    pbar.set_description("train loss: {:.3f}, val loss: {:.3f}, best metric: {:.3f}, has improved: {}".format(loss, val_loss, early_stop.best_metric, early_stop.has_improved))
 
-            if itr >= early_stop_start:
-                if best_loss is None or curr_loss < best_loss:
-                    best_itr = itr
-                    best_loss = curr_loss
-                # if curr_loss > best_loss and itr - best_itr > max_lose_streak:
-                #     print("Early stopping!")
-                #     break
+                if (callback) and epoch % self.train_params.get("log_every_n_epochs"): 
+                    callback(self, loss_out, data_dict, grads)
 
-            # Record parameters
-            record_params = self.train_params.get("record_params")
-            if record_params and record_params(itr):
-                curr_params = deepcopy(self.params)
-                curr_params["iteration"] = itr
-                self.past_params.append(curr_params)
+                if batch_id == num_batches - 1:
+                    # We're at the end of an epoch
+                    # We could randomly shuffle the data
+                    indices = jr.permutation(key, indices)
+                    if (self.train_params.get("use_validation")):
+                        val_loss_out = self.val_epoch(val_key, self.params, val_data, val_targets, val_u)
+                        if (val_callback) and epoch % self.train_params.get("log_every_n_epochs"): 
+                            val_callback(self, val_loss_out, data_dict)
+                        val_loss, _ = val_loss_out
+                        self.val_losses.append(val_loss)
 
-            if (mask_start and itr == mask_start):
-                self.train_params["mask_size"] = mask_size
-                train_step = jit(self.train_step)
-                val_step = jit(self.val_step)
+                        if epoch % self.train_params.get("checkpoint_every_n_epochs") and epoch != 0:
 
-            if batch_id == num_batches - 1:
-                # if early stopping criteria met, break
-                _, early_stop = early_stop.update(val_loss)
-                if early_stop.should_stop:
-                    
-                    print('Early stopping criteria met, breaking...')
-                    
-                    break
+                            self.mngr.save(epoch,
+                                           items={'recognition_model_state': self.opt_states[0],
+                                                  'decoder_model_state': self.opt_states[1],
+                                                  'prior_model_state': self.opt_states[2]},
+                                           # save_kwargs={'recognition_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[0])},
+                                           # 'decoder_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[1])},
+                                           # 'prior_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[2])}
+                                           # },
+                                           metrics=float(val_loss))
+                                                    
+                if not self.train_params.get("use_validation") or val_loss is None:
+                    curr_loss = loss
+                else:
+                    curr_loss = val_loss
 
-        if summary:
-            summary(self, data_dict)
+                if itr >= early_stop_start:
+                    if best_loss is None or curr_loss < best_loss:
+                        best_itr = itr
+                        best_loss = curr_loss
+                    # if curr_loss > best_loss and itr - best_itr > max_lose_streak:
+                    #     print("Early stopping!")
+                    #     break
+
+                # Record parameters
+                record_params = self.train_params.get("record_params")
+                if record_params and record_params(itr):
+                    curr_params = deepcopy(self.params)
+                    curr_params["iteration"] = itr
+                    self.past_params.append(curr_params)
+
+                if (mask_start and itr == mask_start):
+                    self.train_params["mask_size"] = mask_size
+                    train_step = jit(self.train_step)
+                    val_step = jit(self.val_step)
+
+                if batch_id == num_batches - 1 and itr > self.train_params.get("early_stop_start"):
+                    # if early stopping criteria met, break
+                    early_stop = early_stop.update(val_loss)
+                    # print("train loss, val_loss:", loss, val_loss)
+                    # print("best metric", early_stop.best_metric)
+                    # print("has improved", early_stop.has_improved)
+                    if early_stop.should_stop:
+                        
+                        print('Early stopping criteria met, breaking...')
+                        
+                        break
+
+            if summary:
+                summary(self, data_dict)
+
+            self.mngr.wait_until_finished()
 
 def svae_init(key, model, data, initial_params=None, **train_params):
     init_params = model.init(key)
@@ -413,10 +455,12 @@ def svae_init(key, model, data, initial_params=None, **train_params):
         init_params["prior_params"]["A"] = np.zeros_like(A)
 
     learning_rate = train_params["learning_rate"]
-    rec_opt = opt.adam(learning_rate=learning_rate)
-    rec_opt_state = rec_opt.init(init_params["rec_params"])
-    dec_opt = opt.adam(learning_rate=learning_rate)
-    dec_opt_state = dec_opt.init(init_params["dec_params"])
+    rec_opt = opt.chain(opt.adamw(learning_rate=learning_rate, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
+    # rec_opt_state = rec_opt.init(init_params["rec_params"])
+    # rec_opt_state, rec_opt_ckptr =  get_train_state(rec_opt, model, init_params["rec_params"], train_params, "recognition_model")
+    dec_opt = opt.chain(opt.adamw(learning_rate=learning_rate, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
+    # dec_opt_state = dec_opt.init(init_params["dec_params"])
+    # dec_opt_state, dec_opt_ckptr =  get_train_state(dec_opt, model, init_params["dec_params"], train_params, "decoder_model")
 
     if (train_params.get("use_natural_grad")):
         prior_lr = None
@@ -425,12 +469,18 @@ def svae_init(key, model, data, initial_params=None, **train_params):
     else:
         # Add the option of using an gradient optimizer for prior parameters
         prior_lr = train_params.get("prior_learning_rate") or learning_rate
-        prior_opt = opt.adam(learning_rate=prior_lr)
-        prior_opt_state = prior_opt.init(init_params["prior_params"])
+        prior_opt = opt.chain(opt.adamw(learning_rate=prior_lr, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
+        # prior_opt_state = prior_opt.init(init_params["prior_params"])
+        # prior_opt_state, prior_opt_ckptr =  get_train_state(prior_opt, model, init_params["prior_params"], train_params, "prior_model")
+
+    all_optimisers = (rec_opt, dec_opt, prior_opt)
+    all_params = (init_params["rec_params"], init_params["dec_params"], init_params["prior_params"])
+    (rec_opt_state, dec_opt_state, prior_opt_state), mngr = get_train_state(model, all_optimisers, all_params, train_params)
 
     return (init_params, 
-            (rec_opt, dec_opt, prior_opt), 
-            (rec_opt_state, dec_opt_state, prior_opt_state))
+            all_optimisers, 
+            (rec_opt_state, dec_opt_state, prior_opt_state),
+            mngr)
     
 def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0, **train_params):
     batch_size = data_batch.shape[0]
@@ -491,17 +541,18 @@ def svae_update(params, grads, opts, opt_states, model, aux, **train_params):
     rec_opt, dec_opt, prior_opt = opts
     rec_opt_state, dec_opt_state, prior_opt_state = opt_states
     rec_grad, dec_grad = grads["rec_params"], grads["dec_params"]
-    updates, rec_opt_state = rec_opt.update(rec_grad, rec_opt_state)
-    params["rec_params"] = opt.apply_updates(params["rec_params"], updates)
+    # updates, rec_opt_state = rec_opt.update(rec_grad, rec_opt_state, params["rec_params"])
+    # params["rec_params"] = opt.apply_updates(params["rec_params"], updates)
+    rec_opt_state = rec_opt_state.apply_gradients(grads = rec_grad)
+    params["rec_params"] = rec_opt_state.params
     params["post_params"] = aux["posterior_params"]
     params["post_samples"] = aux["posterior_samples"]
     if train_params["run_type"] == "model_learning":
         # Update decoder
-        updates, dec_opt_state = dec_opt.update(dec_grad, dec_opt_state)
-        params["dec_params"] = opt.apply_updates(params["dec_params"], updates)
-
-        old_Q = deepcopy(params["prior_params"]["Q"])
-        old_B = deepcopy(params["prior_params"]["B"])
+        # updates, dec_opt_state = dec_opt.update(dec_grad, dec_opt_state, params["dec_params"])
+        # params["dec_params"] = opt.apply_updates(params["dec_params"], updates)
+        dec_opt_state = dec_opt_state.apply_gradients(grads = dec_grad)
+        params["dec_params"] = dec_opt_state.params
 
         # Update prior parameters
         if (train_params.get("use_natural_grad")):
@@ -514,23 +565,19 @@ def svae_update(params, grads, opts, opt_states, model, aux, **train_params):
                 avg_suff_stats, suff_stats)
             params["prior_params"] = model.prior.m_step(params["prior_params"])
         else:
-            updates, prior_opt_state = prior_opt.update(grads["prior_params"], prior_opt_state)
-            params["prior_params"] = opt.apply_updates(params["prior_params"], updates)
-        
-        if (train_params.get("constrain_prior")):
-            # Revert Q and b to their previous values
-            params["prior_params"]["Q"] = old_Q
-            params["prior_params"]["B"] = old_B
+            # updates, prior_opt_state = prior_opt.update(grads["prior_params"], prior_opt_state, params["prior_params"])
+            # params["prior_params"] = opt.apply_updates(params["prior_params"], updates)
+            prior_opt_state = prior_opt_state.apply_gradients(grads = grads["prior_params"])
+            params["prior_params"] = prior_opt_state.params
     
-    A = params["prior_params"]["A"]
     if (train_params.get("run_type") == "vae_baseline"):
         # Zero out the updated dynamics matrix
-        params["prior_params"]["A"] = np.zeros_like(A)
-    else:
-        if (train_params.get("constrain_dynamics")):
-            # Scale A so that its maximum singular value does not exceed 1
-            params["prior_params"]["A"] = truncate_singular_values(A)
-            # params["prior_params"]["A"] = scale_singular_values(params["prior_params"]["A"])
+        params["prior_params"]["A"] = np.zeros_like(params["prior_params"]["A"])
+    # else:
+    #     if (train_params.get("constrain_dynamics")):
+    #         # Scale A so that its maximum singular value does not exceed 1
+    #         params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
+    #         # params["prior_params"]["A"] = scale_singular_values(params["prior_params"]["A"])
 
     return params, (rec_opt_state, dec_opt_state, prior_opt_state)
 

@@ -9,7 +9,7 @@ key_0 = jr.PRNGKey(0)
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
 
-from svae.utils import random_rotation, inv_softplus, lie_params_to_constrained
+from svae.utils import construct_dynamics_matrix, inv_softplus, lie_params_to_constrained, scale_matrix_by_norm
 from svae.distributions import LinearGaussianChain
 from svae.utils import dynamics_to_tridiag
 
@@ -34,8 +34,8 @@ class SVAEPrior:
         pass
     
     def sample(self, params, u, shape, key):
-        dd = self.get_constrained_params(params, u)
-        return self.distribution(dd).sample(sample_shape=shape, seed=key)
+        samples = self.distribution(self.get_constrained_params(params, u)).sample(u=u, sample_shape=shape, seed=key)
+        return samples
 
     def get_constrained_params(self, params, u):
         return deepcopy(params)
@@ -103,7 +103,7 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
 
     def init(self, key):
         D, U = self.latent_dims, self.input_dims
-        key_A, key = jr.split(key, 2)
+        key_A_u, key_A_v, key_A_s, key_B= jr.split(key, 4)
         # Equivalent to the unit matrix
         eps = min(self.init_dynamics_noise_scale / 100, 1e-4)
         Q_flat = np.concatenate([np.ones(D) 
@@ -111,9 +111,13 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
         Q1_flat = np.concatenate([np.ones(D) * inv_softplus(1), np.zeros((D*(D-1)//2))])
         params = {
             "m1": np.zeros(D),
-            "A": random_rotation(key_A, D, theta=np.pi/20),
+            # "Q1": np.zeros(D),
+            "A_u": jr.normal(key_A_u, (D, D)),
+            "A_v": jr.normal(key_A_v, (D, D)),
+            "A_s": jr.normal(key_A_s, (D,)),
             "Q1": Q1_flat,
-            "B": np.ones((D, U)),
+            "B": jr.normal(key_B, (D, U)),
+            # "Q": np.zeros(D),
             "Q": Q_flat
         }
         return params
@@ -122,9 +126,12 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
         return {
             "m1": params["m1"],
             "Q1": lie_params_to_constrained(params["Q1"], self.latent_dims),
-            "A": params["A"],
-            "B": params["B"],
+            # "Q1": np.diag(np.exp(params["Q1"])),
+            "A": construct_dynamics_matrix(params["A_u"], params["A_v"], params["A_s"], self.latent_dims),
+            "B": scale_matrix_by_norm(params["B"]),
+            # "B":params["B"],
             "Q": lie_params_to_constrained(params["Q"], self.latent_dims)   
+            # "Q":  np.diag(np.exp(params["Q"]))   
         }
 
     def get_constrained_params(self, params, u):
