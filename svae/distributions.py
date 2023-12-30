@@ -19,7 +19,7 @@ from svae.utils import dynamics_to_tridiag
 
 class LinearGaussianChain:
     def __init__(self, dynamics_matrix, dynamics_bias, noise_covariance,
-                 expected_states, expected_states_squared, expected_states_next_states):
+                 expected_states, covariances, expected_states_squared, expected_states_next_states):
         """
         params: dictionary containing the following keys:
             A:  (seq_len, dim, dim)
@@ -30,6 +30,7 @@ class LinearGaussianChain:
         self._dynamics_bias = dynamics_bias
         self._noise_covariance = noise_covariance
         self._expected_states = expected_states
+        self._covariances = covariances
         self._expected_states_squared = expected_states_squared
         self._expected_states_next_states = expected_states_next_states
 
@@ -59,19 +60,20 @@ class LinearGaussianChain:
         expected_states_next_states = np.einsum("...ij,...jk->...ik",
                                                 covariances[:-1], dynamics_matrix[1:]) + np.einsum("...i,...j->...ji",
                                                                                                    Ex[:-1], Ex[1:])
-
         return cls(dynamics_matrix, dynamics_bias, noise_covariance,
-                   expected_states, expected_states_squared, expected_states_next_states)
+                   expected_states, covariances, expected_states_squared, expected_states_next_states)
 
     @property
     def mean(self):
         return self._expected_states
 
     @property
+    # def covariance(self):
+    #     Ex = self._expected_states
+    #     ExxT = self._expected_states_squared
+    #     return ExxT - np.einsum("...i,...j->...ij", Ex, Ex)
     def covariance(self):
-        Ex = self._expected_states
-        ExxT = self._expected_states_squared
-        return ExxT - np.einsum("...i,...j->...ij", Ex, Ex)
+        return self._covariances
 
     @property
     def expected_states(self):

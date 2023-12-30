@@ -13,6 +13,8 @@ from svae.utils import construct_dynamics_matrix, inv_softplus, lie_params_to_co
 from svae.distributions import LinearGaussianChain
 from svae.utils import dynamics_to_tridiag
 
+from dynamax.utils.utils import psd_solve
+
 class SVAEPrior:
     def init(self, key):
         """
@@ -59,8 +61,8 @@ class LinearGaussianChainPrior(SVAEPrior):
     # Must be the full set of constrained parameters!
     def distribution(self, params):
         As, bs, Qs = params["As"], params["bs"], params["Qs"]
-        Ex, ExxT, ExnxT = params["Ex"], params["ExxT"], params["ExnxT"]
-        return LinearGaussianChain(As, bs, Qs, Ex, ExxT, ExnxT)
+        Ex, Sigma, ExxT, ExnxT = params["Ex"], params["Sigma"], params["ExxT"], params["ExnxT"]
+        return LinearGaussianChain(As, bs, Qs, Ex, Sigma, ExxT, ExnxT)
 
     def init(self, key):
         T, D = self.seq_len, self.latent_dims
@@ -89,9 +91,20 @@ class LinearGaussianChainPrior(SVAEPrior):
             "bs": dist._dynamics_bias,
             "Qs": dist._noise_covariance,
             "Ex": dist.expected_states,
+            "Sigma": dist.covariance,
             "ExxT": dist.expected_states_squared,
             "ExnxT": dist.expected_states_next_states
         })
+
+        # # natural parameters of prior marginals
+        # prior_J = psd_solve(p["Sigma"], np.eye(self.latent_dims)[None])
+        # prior_h = prior_J @ p["Ex"]
+
+        # p.update({
+        #     "prior_J": prior_J,
+        #     "prior_h": prior_h
+        # })
+
         return p
 
 class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):

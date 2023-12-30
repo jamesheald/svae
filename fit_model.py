@@ -1,4 +1,7 @@
 ###############
+# compare performance with f_twiddles removed (set to 1)
+# change dynamics model to A x + B u + b for added expressivity
+# in rpm, do i want to compute marginal priors using specific u in each episode, if not i would need to define prior on u and integrate u out
 # use cholesky decomposition to rperesents Sigmas?!
 # change rec/dec architecture so one NN for both mean and logvar, not 2. also consider whether you want diag cov for both rec and dec?
 # reparameterization_type was set to reparameterization.NOT_REPARAMETERIZED?!
@@ -8,19 +11,24 @@
 # lots of non pure functions!! e.g. _generic_sampling_element
 # dynamics matrix minus eye for stability hacky
 
-# from jax import config
-# config.update("jax_enable_x64", True)
+from jax import config
+config.update("jax_enable_x64", True)
+config.update("jax_debug_nans", True)
+config.update("jax_disable_jit", True)
 
 from svae.experiments import run_pendulum_control
 import jax.random as jr
 
 run_params = {
-    "inference_method": "svae",
+    "inference_method": "rpm", # "svae"
     "latent_dims": 3,
     "emission_dims": 3,
     "input_dims": 1,
-    "rec_features": [512],
-    "dec_features": [512],
+    "rec_trunk_features": [512],
+    "rec_head_mean_features": [],
+    "rec_head_var_features": [],
+    "rec_diagonal_covariance" : False,
+    # "dec_features": [512],
     "seed": jr.PRNGKey(1),
     "sample_kl": False,
     "use_parallel_kf": True,

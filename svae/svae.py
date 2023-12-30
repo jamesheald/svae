@@ -5,10 +5,10 @@ import jax.random as jr
 
 import numpy as onp
 
-from jax.scipy.linalg import block_diag
-from jax.numpy.linalg import solve
-import tensorflow_probability.substrates.jax.distributions as tfd
-MVN = tfd.MultivariateNormalFullCovariance
+# from jax.scipy.linalg import block_diag
+# from jax.numpy.linalg import solve
+# import tensorflow_probability.substrates.jax.distributions as tfd
+# MVN = tfd.MultivariateNormalFullCovariance
 
 class SVAE:
     def __init__(self,

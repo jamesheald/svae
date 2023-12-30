@@ -10,6 +10,8 @@ from flax.linen import Conv, ConvTranspose
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
 
+from dynamax.utils.utils import psd_solve
+
 # Common math functions
 from flax.linen import softplus
 from jax.numpy.linalg import inv
@@ -19,7 +21,7 @@ from typing import (Any, Callable, Sequence, Iterable)
 
 import numpy as onp
 
-from svae.utils import lie_params_to_constrained
+from svae.utils import lie_params_to_constrained, construct_covariance_matrix
 
 PRNGKey = Any
 Shape = Iterable[int]
@@ -113,6 +115,27 @@ class DCNN(nn.Module):
         return x
 
 # @title Potential networks (outputs potentials on single observations)
+class RPMPotentialNetwork(nn.Module):
+    def __call__(self, inputs):
+        Sigma, mu, J, h = self._generate_distribution_parameters(inputs)
+        return { "Sigma": Sigma, "mu": mu, "J": J, "h": h}
+
+    def _generate_distribution_parameters(self, inputs):
+        if (len(inputs.shape) == self.input_rank + 2):
+            # We have both a batch dimension and a time dimension
+            # and we have to vmap over both...!
+            return vmap(vmap(self._call_single, 0), 0)(inputs)
+        elif (len(inputs.shape) == self.input_rank + 1):
+            return vmap(self._call_single)(inputs)
+        elif (len(inputs.shape) == self.input_rank):
+            return self._call_single(inputs)
+        else:
+            # error
+            return None
+
+    def _call_single(self, inputs):
+        pass
+
 class PotentialNetwork(nn.Module):
     def __call__(self, inputs):
         Sigma, mu = self._generate_distribution_parameters(inputs)
@@ -133,6 +156,61 @@ class PotentialNetwork(nn.Module):
 
     def _call_single(self, inputs):
         pass
+
+class RPM(RPMPotentialNetwork):
+
+    use_diag : int = None
+    input_rank : int = None
+    latent_dims : int = None
+    trunk_fn : nn.Module = None
+    head_mean_fn : nn.Module = None
+    head_log_var_fn : nn.Module = None
+    eps : float = None
+
+    @classmethod
+    def from_params(cls, input_rank=1, input_dim=None, output_dim=None, 
+                    trunk_type="Identity", trunk_params=None, 
+                    head_mean_type="MLP", head_mean_params=None,
+                    head_var_type="MLP", head_var_params=None, diagonal_covariance=False,
+                    cov_init=1, eps=1e-4): 
+
+        if trunk_type == "Identity":
+            trunk_params = { "features": input_dim}
+        if head_mean_type == "MLP":
+            head_mean_params["features"] += [output_dim]
+        if head_var_type == "MLP":
+            if (diagonal_covariance):
+                head_var_params["features"] += [output_dim]
+            else:
+                head_var_params["features"] += [output_dim * (output_dim + 1) // 2]
+            head_var_params["kernel_init"] = nn.initializers.zeros
+            head_var_params["bias_init"] = nn.initializers.constant(cov_init)
+
+        trunk_fn = globals()[trunk_type](**trunk_params)
+        head_mean_fn = globals()[head_mean_type](**head_mean_params)
+        head_log_var_fn = globals()[head_var_type](**head_var_params)
+
+        return cls(diagonal_covariance, input_rank, output_dim, trunk_fn, 
+                   head_mean_fn, head_log_var_fn, eps)
+
+    def _call_single(self, inputs):
+        # Apply the trunk.
+        trunk_output = self.trunk_fn(inputs)
+        # Get the mean.
+        mu = self.head_mean_fn(trunk_output)
+        # Get the covariance parameters and build a full matrix from it.
+        var_output_flat = self.head_log_var_fn(trunk_output)
+        if self.use_diag:
+            Sigma = np.diag(softplus(var_output_flat) + self.eps)
+        else:
+            Sigma = construct_covariance_matrix(var_output_flat, self.latent_dims)
+            # Sigma = lie_params_to_constrained(var_output_flat, self.latent_dims, self.eps)
+        J = psd_solve(Sigma, np.eye(self.latent_dims))
+        h = J @ mu
+        # J = np.linalg.inv(Sigma)
+        # lower diagonal blocks of precision matrix
+        # return (Sigma, mu)
+        return Sigma, mu, J, h
 
 # A new, more general implementation of the Gaussian recognition network
 # Uses mean parameterization which works better empirically

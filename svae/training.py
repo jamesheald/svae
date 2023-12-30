@@ -27,6 +27,8 @@ from flax.training.early_stopping import EarlyStopping
 from flax.training.orbax_utils import save_args_from_target
 from orbax.checkpoint import SaveArgs
 
+from dynamax.utils.utils import psd_solve
+
 # @title Experiment scheduler
 LINE_SEP = "#" * 42
 
@@ -458,9 +460,10 @@ def svae_init(key, model, data, initial_params=None, **train_params):
     rec_opt = opt.chain(opt.adamw(learning_rate=learning_rate, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
     # rec_opt_state = rec_opt.init(init_params["rec_params"])
     # rec_opt_state, rec_opt_ckptr =  get_train_state(rec_opt, model, init_params["rec_params"], train_params, "recognition_model")
-    dec_opt = opt.chain(opt.adamw(learning_rate=learning_rate, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
-    # dec_opt_state = dec_opt.init(init_params["dec_params"])
-    # dec_opt_state, dec_opt_ckptr =  get_train_state(dec_opt, model, init_params["dec_params"], train_params, "decoder_model")
+    if train_params["inference_method"] != "rpm":
+        dec_opt = opt.chain(opt.adamw(learning_rate=learning_rate, weight_decay=train_params.get("weight_decay")), opt.clip_by_global_norm(train_params.get("max_grad_norm")))
+        # dec_opt_state = dec_opt.init(init_params["dec_params"])
+        # dec_opt_state, dec_opt_ckptr =  get_train_state(dec_opt, model, init_params["dec_params"], train_params, "decoder_model")
 
     if (train_params.get("use_natural_grad")):
         prior_lr = None
@@ -473,23 +476,41 @@ def svae_init(key, model, data, initial_params=None, **train_params):
         # prior_opt_state = prior_opt.init(init_params["prior_params"])
         # prior_opt_state, prior_opt_ckptr =  get_train_state(prior_opt, model, init_params["prior_params"], train_params, "prior_model")
 
-    all_optimisers = (rec_opt, dec_opt, prior_opt)
-    all_params = (init_params["rec_params"], init_params["dec_params"], init_params["prior_params"])
-    (rec_opt_state, dec_opt_state, prior_opt_state), mngr = get_train_state(model, all_optimisers, all_params, train_params)
+    if train_params["inference_method"] != "rpm":
+        all_optimisers = (rec_opt, dec_opt, prior_opt)
+        all_params = (init_params["rec_params"], init_params["dec_params"], init_params["prior_params"])
+        all_opt_states, mngr = get_train_state(model, all_optimisers, all_params, train_params)
+    else:
+        all_optimisers = (rec_opt, prior_opt)
+        all_params = (init_params["rec_params"], init_params["prior_params"])
+        all_opt_states, mngr = get_train_state(model, all_optimisers, all_params, train_params)
+
 
     return (init_params, 
             all_optimisers, 
-            (rec_opt_state, dec_opt_state, prior_opt_state),
+            all_opt_states,
             mngr)
     
 def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0, **train_params):
     batch_size = data_batch.shape[0]
+    n_timepoints = data_batch.shape[1]
     # Axes specification for vmap
     # We're just going to ignore this for now
-    params_in_axes = None
+
+    RPM_batch = model.recognition.apply(model_params["rec_params"], data_batch)
+
+    # moment matched approximation to F
+    # https://math.stackexchange.com/questions/195911/calculation-of-the-covariance-of-gaussian-mixtures
+    MM_prior = {}
+    MM_prior['mu'] = RPM_batch['mu'].mean(axis = 0)
+    mu_diff = RPM_batch['mu'] - MM_prior['mu'][None]
+    MM_prior['Sigma'] = RPM_batch['Sigma'].mean(axis = 0) + np.einsum("ijk,ijl->ijkl", mu_diff, mu_diff).mean(axis = 0)
+    MM_prior['J'] = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(MM_prior['Sigma'], np.eye(MM_prior['mu'].shape[-1]))
+    MM_prior['h'] = np.einsum("ijk,ik->ij", MM_prior['J'], MM_prior['mu'])
+
     result = vmap(partial(model.compute_objective, **train_params), 
-                  in_axes=(0, 0, 0, 0, params_in_axes))\
-                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, model_params)
+                  in_axes=(0, 0, 0, 0, 0, None, None, None))\
+                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, np.arange(batch_size), MM_prior, RPM_batch, model_params)
     # Need to compute sufficient stats if we want the natural gradient update
     if (train_params.get("use_natural_grad")):
         post_params = result["posterior_params"]
@@ -499,12 +520,15 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0
             lambda l: np.mean(l,axis=0), post_suff_stats)
         result["sufficient_statistics"] = expected_post_suff_stats
 
-    # objs = result["objective"]
-    if (train_params.get("beta") is None):
-        beta = 1
+    if train_params.get("inference_method") != "rpm":
+        # objs = result["objective"]
+        if (train_params.get("beta") is None):
+            beta = 1
+        else:
+            beta = train_params["beta"](itr)
+        objs = result["ell"] - beta * result["kl"]
     else:
-        beta = train_params["beta"](itr)
-    objs = result["ell"] - beta * result["kl"]
+        objs = result["free_energy"]
 
     return -np.mean(objs), result
 
@@ -538,21 +562,27 @@ def svae_pendulum_val_loss(key, model, data_batch, target_batch, model_params, *
     return obj, out_dict
 
 def svae_update(params, grads, opts, opt_states, model, aux, **train_params):
-    rec_opt, dec_opt, prior_opt = opts
-    rec_opt_state, dec_opt_state, prior_opt_state = opt_states
-    rec_grad, dec_grad = grads["rec_params"], grads["dec_params"]
+    if train_params["inference_method"] != "rpm":
+        rec_opt, dec_opt, prior_opt = opts
+        rec_opt_state, dec_opt_state, prior_opt_state = opt_states
+        rec_grad, dec_grad = grads["rec_params"], grads["dec_params"]
+    else:
+        rec_opt, prior_opt = opts
+        rec_opt_state, prior_opt_state = opt_states
+        rec_grad = grads["rec_params"]
     # updates, rec_opt_state = rec_opt.update(rec_grad, rec_opt_state, params["rec_params"])
     # params["rec_params"] = opt.apply_updates(params["rec_params"], updates)
     rec_opt_state = rec_opt_state.apply_gradients(grads = rec_grad)
     params["rec_params"] = rec_opt_state.params
     params["post_params"] = aux["posterior_params"]
-    params["post_samples"] = aux["posterior_samples"]
+    # params["post_samples"] = aux["posterior_samples"]
     if train_params["run_type"] == "model_learning":
-        # Update decoder
-        # updates, dec_opt_state = dec_opt.update(dec_grad, dec_opt_state, params["dec_params"])
-        # params["dec_params"] = opt.apply_updates(params["dec_params"], updates)
-        dec_opt_state = dec_opt_state.apply_gradients(grads = dec_grad)
-        params["dec_params"] = dec_opt_state.params
+        if train_params["inference_method"] != "rpm":
+            # Update decoder
+            # updates, dec_opt_state = dec_opt.update(dec_grad, dec_opt_state, params["dec_params"])
+            # params["dec_params"] = opt.apply_updates(params["dec_params"], updates)
+            dec_opt_state = dec_opt_state.apply_gradients(grads = dec_grad)
+            params["dec_params"] = dec_opt_state.params
 
         # Update prior parameters
         if (train_params.get("use_natural_grad")):
@@ -579,7 +609,10 @@ def svae_update(params, grads, opts, opt_states, model, aux, **train_params):
     #         params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
     #         # params["prior_params"]["A"] = scale_singular_values(params["prior_params"]["A"])
 
-    return params, (rec_opt_state, dec_opt_state, prior_opt_state)
+    if train_params["inference_method"] != "rpm":
+        return params, (rec_opt_state, dec_opt_state, prior_opt_state)
+    else:
+        return params, (rec_opt_state, prior_opt_state)
 
 def init_model(run_params, data_dict):
     p = deepcopy(run_params)

@@ -20,13 +20,15 @@ from svae.posteriors import DKFPosterior, CDKFPosterior, PlaNetPosterior, LDSSVA
 from svae.priors import LinearGaussianChainPrior, LieParameterizedLinearGaussianChainPrior
 from svae.networks import GaussianRecognition, GaussianBiRNN, TemporalConv, \
     GaussianEmission, GaussianDCNNEmission, GaussianDCNNEmissionFixedCovariance, \
-    PlaNetRecognitionWrapper
+    PlaNetRecognitionWrapper, RPM
 from svae.training import Trainer, experiment_scheduler, svae_pendulum_val_loss, svae_init, svae_loss, svae_update
 from svae.svae import DeepLDS
+from svae.rpm import RPMLDS
 from svae.datasets import sample_lds_dataset, load_nlb, load_pendulum, load_pendulum_control_data
 from svae.logging import summarize_pendulum_run, save_params_to_wandb, log_to_wandb, validation_log_to_wandb, on_error
 
 networks = {
+    "RPM": RPM,
     "GaussianRecognition": GaussianRecognition,
     "GaussianBiRNN": GaussianBiRNN,
     "TemporalConv": TemporalConv,
@@ -47,7 +49,20 @@ def init_model(run_params, data_dict):
 
     run_type = p["run_type"]
     recnet_class = networks[p["recnet_class"]]
-    decnet_class = networks[p["decnet_class"]]
+    rec_net = recnet_class.from_params(**p["recnet_architecture"])
+    if p["inference_method"] == "planet":
+        # Wrap the recognition network
+        rec_net = PlaNetRecognitionWrapper(rec_net)
+
+    if (p["inference_method"] != "rpm"):
+        decnet_class = networks[p["decnet_class"]]
+        dec_net = decnet_class.from_params(**p["decnet_architecture"])
+
+    if (p.get("use_natural_grad")):
+        prior = LinearGaussianChainPrior(latent_dims, num_timesteps)
+    else:
+        prior = LieParameterizedLinearGaussianChainPrior(latent_dims, p["dataset_params"]["input_dims"], num_timesteps, 
+                    init_dynamics_noise_scale=p.get("init_dynamics_noise_scale") or 1)
 
     if p["inference_method"] == "dkf":
         posterior = DKFPosterior(latent_dims, num_timesteps)
@@ -56,33 +71,31 @@ def init_model(run_params, data_dict):
     elif p["inference_method"] == "planet":
         posterior = PlaNetPosterior(p["posterior_architecture"],
                                     latent_dims, num_timesteps)
-    elif p["inference_method"] == "svae":
+    elif p["inference_method"] == "svae" or p["inference_method"] == "rpm":
         # The parallel Kalman stuff only applies to SVAE
         # Since RNN based methods are inherently sequential
         posterior = LDSSVAEPosterior(latent_dims, p["dataset_params"]["input_dims"], num_timesteps, 
                                      use_parallel=p.get("use_parallel_kf"))
-        
-    rec_net = recnet_class.from_params(**p["recnet_architecture"])
-    dec_net = decnet_class.from_params(**p["decnet_architecture"])
-    if p["inference_method"] == "planet":
-        # Wrap the recognition network
-        rec_net = PlaNetRecognitionWrapper(rec_net)
 
-    if (p.get("use_natural_grad")):
-        prior = LinearGaussianChainPrior(latent_dims, num_timesteps)
+    if p["inference_method"] == "rpm":
+        model = RPMLDS(
+                        recognition=rec_net,
+                        prior=prior,
+                        posterior=posterior,
+                        input_dummy=np.zeros(input_shape),
+                        latent_dummy=np.zeros((num_timesteps, latent_dims)),
+                        u_dummy=np.zeros((num_timesteps, p["dataset_params"]["input_dims"]))
+                    )
     else:
-        prior = LieParameterizedLinearGaussianChainPrior(latent_dims, p["dataset_params"]["input_dims"], num_timesteps, 
-                    init_dynamics_noise_scale=p.get("init_dynamics_noise_scale") or 1)
-
-    model = DeepLDS(
-        recognition=rec_net,
-        decoder=dec_net,
-        prior=prior,
-        posterior=posterior,
-        input_dummy=np.zeros(input_shape),
-        latent_dummy=np.zeros((num_timesteps, latent_dims)),
-        u_dummy=np.zeros((num_timesteps, p["dataset_params"]["input_dims"]))
-    )
+        model = DeepLDS(
+                        recognition=rec_net,
+                        decoder=dec_net,
+                        prior=prior,
+                        posterior=posterior,
+                        input_dummy=np.zeros(input_shape),
+                        latent_dummy=np.zeros((num_timesteps, latent_dims)),
+                        u_dummy=np.zeros((num_timesteps, p["dataset_params"]["input_dims"]))
+                    )
 
     initial_params = None
     svae_val_loss = svae_pendulum_val_loss if run_params["dataset"] == "pendulum" else svae_loss
@@ -419,30 +432,25 @@ def expand_lds_parameters(params):
 
 def expand_pendulum_control_parameters(params):
     num_timesteps = params.get("num_timesteps") # or 200
-    # train_trials = { "small": 10, "medium": 100, "large": 1000 }
-    # batch_sizes = {"small": 10, "medium": 10, "large": 10 }
-    # emission_noises = { "small": 10., "medium": 1., "large": .1 }
-    # dynamics_noises = { "small": 0.01, "medium": .1, "large": .1 }
-    # latent_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
     latent_dims = params.get("latent_dims")
-    # emission_dims = { "small": 5, "medium": 10, "large": 20, "32": 64, "64": 128}
     emission_dims = params.get("emission_dims")
-    # input_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
     input_dims = params.get("input_dims")
     max_iters = params.get("max_iters")
 
     # Modify all the architectures according to the parameters given
-    # D, H, N = params["latent_dims"], params["rnn_dims"], params["emission_dims"]
-    # D, H, N, C = latent_dims[params["dimensionality"]], params["rnn_dims"], emission_dims[params["dimensionality"]], input_dims[params["dimensionality"]]
     D, N, C = latent_dims, emission_dims, input_dims
     inf_params = {}
-    if (params["inference_method"] == "svae"):
-        inf_params["recnet_class"] = "GaussianRecognition"
+    if (params["inference_method"] == "svae") or (params["inference_method"] == "rpm"):
+        if (params["inference_method"] == "svae"):
+            inf_params["recnet_class"] = "GaussianRecognition"
+        elif (params["inference_method"] == "rpm"):
+            inf_params["recnet_class"] = "RPM"
         architecture = deepcopy(MLP_recnet_architecture)
         architecture["output_dim"] = D
-        architecture["head_mean_params"] = { "features": deepcopy(params.get("rec_features")) }
-        architecture["head_var_params"] = { "features": deepcopy(params.get("rec_features")) }
-        architecture["diagonal_covariance"] = True if params.get("diagonal_covariance") else False
+        architecture["trunk_params"] = { "features": deepcopy(params.get("rec_trunk_features")) }
+        architecture["head_mean_params"] = { "features": deepcopy(params.get("rec_head_mean_features")) }
+        architecture["head_var_params"] = { "features": deepcopy(params.get("rec_head_var_features")) }
+        architecture["diagonal_covariance"] = True if params.get("rec_diagonal_covariance") else False
     elif (params["inference_method"] in ["dkf", "cdkf"]):
         inf_params["recnet_class"] = "GaussianBiRNN"
         architectures = {
@@ -487,12 +495,13 @@ def expand_pendulum_control_parameters(params):
     else:
         print("Inference method not found: " + params["inference_method"])
         assert(False)
-    decnet_architecture = deepcopy(MLP_decnet_architecture)
-    decnet_architecture["output_dim"] = N
-    decnet_architecture["head_mean_params"] = { "features": deepcopy(params.get("dec_features")) }
-    decnet_architecture["head_var_params"] = { "features": deepcopy(params.get("dec_features")) }
-    inf_params["decnet_class"] = "GaussianEmission"
-    inf_params["decnet_architecture"] = decnet_architecture
+    if (params["inference_method"] != "rpm"):
+        decnet_architecture = deepcopy(MLP_decnet_architecture)
+        decnet_architecture["output_dim"] = N
+        decnet_architecture["head_mean_params"] = { "features": deepcopy(params.get("dec_features")) }
+        decnet_architecture["head_var_params"] = { "features": deepcopy(params.get("dec_features")) }
+        inf_params["decnet_class"] = "GaussianEmission"
+        inf_params["decnet_architecture"] = decnet_architecture
     inf_params["recnet_architecture"] = architecture
 
     lr, prior_lr = get_lr(params, max_iters)
@@ -514,7 +523,7 @@ def expand_pendulum_control_parameters(params):
             "input_dims": C,
         },
         # Implementation choice
-        "use_parallel_kf": False,
+        "use_parallel_kf": True,
         # Training specifics
         "max_iters": max_iters,
         "elbo_samples": 1,

@@ -45,6 +45,15 @@ def sample_from_MVN(mu, Sigma, key):
 
     return x
 
+def construct_covariance_matrix(x, dim):
+
+    # create lower triangular matrix
+    L = np.zeros((dim, dim))
+    L = L.at[np.tril_indices(dim)].set(x)
+    Sigma = L @ L.T
+
+    return Sigma
+
 # converts an (n(n+1)/2,) vector of Lie parameters
 # to an (n, n) matrix
 def lie_params_to_constrained(out_flat, dim, eps=1e-4):
@@ -170,11 +179,17 @@ def get_train_state(model, all_optimisers, all_params, train_params):
 
     # keep only the best 'max_to_keep' checkpoints
     options = CheckpointManagerOptions(max_to_keep=3, best_fn=lambda metrics: metrics, best_mode='min')
-    mngr = CheckpointManager(ckpt_metrics_dir,  
-                             {'recognition_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
-                              'decoder_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
-                              'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
-                             options)
+    if train_params["inference_method"] != "rpm":
+        mngr = CheckpointManager(ckpt_metrics_dir,  
+                                 {'recognition_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                                  'decoder_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                                  'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
+                                 options)
+    else:
+        mngr = CheckpointManager(ckpt_metrics_dir,  
+                                 {'recognition_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                                  'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
+                                 options)
 
     states = []
     for params, optimiser in zip(all_params, all_optimisers):
@@ -186,7 +201,10 @@ def get_train_state(model, all_optimisers, all_params, train_params):
         # restore the best checkpoint from train_params["reload_dir"]
         items = mngr.restore(mngr.best_step())
 
-        states = [items['recognition_model_state'],  items['decoder_model_state'],  items['prior_model_state']]
+        if train_params["inference_method"] != "rpm":
+            states = [items['recognition_model_state'],  items['decoder_model_state'],  items['prior_model_state']]
+        else:
+            states = [items['recognition_model_state'],  items['prior_model_state']]
         # items['metrics']
 
         # change ckpt_metrics_dir to train_params["save_dir"]
