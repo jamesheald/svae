@@ -159,10 +159,10 @@ def load_pendulum_control_data(run_params):
     obj = pickle.load(open("pendulum_data.pkl", 'rb'))
 
     sigma = 0
-    # N_train = 800
-    # N_val = 200
-    N_train = 10
-    N_val = 10
+    N_train = 800
+    N_val = 200
+    # N_train = 10
+    # N_val = 10
 
     data_dict = {}
     data_dict["train_data"] = np.array(obj['observations'][:N_train, :, :])

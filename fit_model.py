@@ -2,7 +2,6 @@
 # compare performance with f_twiddles removed (set to 1)
 # change dynamics model to A x + B u + b for added expressivity
 # in rpm, do i want to compute marginal priors using specific u in each episode, if not i would need to define prior on u and integrate u out
-# use cholesky decomposition to rperesents Sigmas?!
 # change rec/dec architecture so one NN for both mean and logvar, not 2. also consider whether you want diag cov for both rec and dec?
 # reparameterization_type was set to reparameterization.NOT_REPARAMETERIZED?!
 # itr passed via partial to loss function - surely wrong?
@@ -32,8 +31,8 @@ run_params = {
     "seed": jr.PRNGKey(1),
     "sample_kl": False,
     "use_parallel_kf": True,
-    "train_batch_size": 10,
-    "val_batch_size": 10,
+    "train_batch_size": 800,
+    "val_batch_size": 200,
     "num_timesteps": 100,
     "mask_size": 0,
     "mask_start": 0,

@@ -35,9 +35,9 @@ class LinearGaussianChain:
         self._expected_states_next_states = expected_states_next_states
 
     @classmethod
-    def from_stationary_dynamics(cls, m1, Q1, A, B, u, Q, T):
+    def from_stationary_dynamics(cls, m1, Q1, A, b, Q, T):
         dynamics_matrix = np.tile(A[None], (T, 1, 1))
-        dynamics_bias = np.concatenate([m1[None], u[:-1] @ B.T])
+        dynamics_bias = np.concatenate([m1[None], b])
         # dynamics_bias = np.concatenate([m1[None], np.tile(np.zeros(3,), (T - 1, 1))])
         noise_covariance = np.concatenate([Q1[None],
                                            np.tile(Q[None], (T - 1, 1, 1))])

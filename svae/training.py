@@ -385,15 +385,25 @@ class Trainer:
 
                         if epoch % self.train_params.get("checkpoint_every_n_epochs") and epoch != 0:
 
-                            self.mngr.save(epoch,
-                                           items={'recognition_model_state': self.opt_states[0],
-                                                  'decoder_model_state': self.opt_states[1],
-                                                  'prior_model_state': self.opt_states[2]},
-                                           # save_kwargs={'recognition_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[0])},
-                                           # 'decoder_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[1])},
-                                           # 'prior_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[2])}
-                                           # },
-                                           metrics=float(val_loss))
+                            if self.train_params.get("inference_method") != "rpm":
+                                self.mngr.save(epoch,
+                                               items={'recognition_model_state': self.opt_states[0],
+                                                      'decoder_model_state': self.opt_states[1],
+                                                      'prior_model_state': self.opt_states[2]},
+                                               # save_kwargs={'recognition_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[0])},
+                                               # 'decoder_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[1])},
+                                               # 'prior_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[2])}
+                                               # },
+                                               metrics=float(val_loss))
+                            else:
+                                self.mngr.save(epoch,
+                                               items={'recognition_model_state': self.opt_states[0],
+                                                      'prior_model_state': self.opt_states[1]},
+                                               # save_kwargs={'recognition_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[0])},
+                                               # 'decoder_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[1])},
+                                               # 'prior_model_state': {'save_args': tree_map(lambda _: SaveArgs(), self.opt_states[2])}
+                                               # },
+                                               metrics=float(val_loss))
                                                     
                 if not self.train_params.get("use_validation") or val_loss is None:
                     curr_loss = loss
@@ -507,6 +517,8 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0
     MM_prior['Sigma'] = RPM_batch['Sigma'].mean(axis = 0) + np.einsum("ijk,ijl->ijkl", mu_diff, mu_diff).mean(axis = 0)
     MM_prior['J'] = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(MM_prior['Sigma'], np.eye(MM_prior['mu'].shape[-1]))
     MM_prior['h'] = np.einsum("ijk,ik->ij", MM_prior['J'], MM_prior['mu'])
+
+    prior_params = model.prior.get_marginals_under_optimal_control(model_params["prior_params"], u)
 
     result = vmap(partial(model.compute_objective, **train_params), 
                   in_axes=(0, 0, 0, 0, 0, None, None, None))\

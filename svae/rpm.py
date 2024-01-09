@@ -114,7 +114,7 @@ class RPM:
         potential = {}
         potential['J'] = RPM_batch["J"][batch_id] - MM_prior["J"]
         potential['h'] = RPM_batch["h"][batch_id] - MM_prior["h"]
-        potential['Sigma'] = vmap(lambda J, I: psd_solve(J, I), in_axes=(0, None))(potential["J"], np.eye(self.prior.latent_dims))
+        potential['Sigma'] = vmap(lambda J, I: psd_solve(J + np.eye(3) * (abs(np.linalg.eigvals(J).min()) + 1e-4), I), in_axes=(0, None))(potential["J"], np.eye(self.prior.latent_dims))
         potential['mu'] = np.einsum("ijk,ik->ij", potential['Sigma'], potential['h'])
 
         # Update: it makes more sense that inference is done in the posterior object
@@ -138,19 +138,39 @@ class RPM:
         posterior_h = np.einsum("ijk,ik->ij", posterior_J, post_Ex)
         
         # expected log auxiliary factors < log \tilde{f} >
+        # Murphy section 2.3.2.5
         auxillary_J = MM_prior["J"] - posterior_J
         auxillary_h = MM_prior["h"] - posterior_h
         E_log_aux = np.einsum("ij,ij->i", auxillary_h, post_Ex) - 0.5 * (np.einsum("ij,ij->i", post_Ex, np.einsum("ijk,ik->ij", auxillary_J, post_Ex)) + (auxillary_J * post_Sigma).sum(axis = (1, 2)))
 
-        normalised_auxillary_J = posterior_J[None] + RPM_batch["J"] - MM_prior["J"][None]
-        normalised_auxillary_h = posterior_h[None] + RPM_batch["h"] - MM_prior["h"][None]
+        # use the current plus one random data point
+        batch_size = RPM_batch["J"].shape[0]
+        timepoints = RPM_batch["J"].shape[1]
+        probs = np.ones(batch_size) / (batch_size - 1)
+        probs = probs.at[batch_id].set(0)
+        sample_datapoint = jr.choice(key, np.concatenate([np.arange(batch_size)]), p = probs, shape=(timepoints,))
+
+        RPM_J = np.concatenate((RPM_batch["J"][batch_id][None], RPM_batch["J"][sample_datapoint, np.arange(timepoints)][None]))
+        RPM_h = np.concatenate((RPM_batch["h"][batch_id][None], RPM_batch["h"][sample_datapoint, np.arange(timepoints)][None]))
+
+        normalised_auxillary_J = posterior_J[None] + RPM_J - MM_prior["J"][None]
+        normalised_auxillary_h = posterior_h[None] + RPM_h - MM_prior["h"][None]
 
         normalised_auxillary_log_normaliser = self.log_normaliser(normalised_auxillary_J, normalised_auxillary_h)
-        RPM_log_normaliser = self.log_normaliser(RPM_batch["J"][batch_id][None], RPM_batch["h"][batch_id][None])
+        RPM_log_normaliser = self.log_normaliser(RPM_J, RPM_h)
 
-        log_Gamma = logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0, b=1/normalised_auxillary_log_normaliser.shape[0])
+        log_Gamma = logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0, b=np.array([1, batch_size - 1])[:, None].repeat(timepoints, axis = 1)/batch_size)
 
-        free_energy = -kl_qp - kl_qf - E_log_aux.sum() - log_Gamma.sum()
+        # use all datapoints
+        # normalised_auxillary_J = posterior_J[None] + RPM_batch["J"] - MM_prior["J"][None]
+        # normalised_auxillary_h = posterior_h[None] + RPM_batch["h"] - MM_prior["h"][None]
+
+        # normalised_auxillary_log_normaliser = self.log_normaliser(normalised_auxillary_J, normalised_auxillary_h)
+        # RPM_log_normaliser = self.log_normaliser(RPM_batch["J"], RPM_batch["h"])
+
+        # log_Gamma = logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0, b=1/normalised_auxillary_log_normaliser.shape[0])
+
+        free_energy = - kl_qp - kl_qf - E_log_aux.sum() - log_Gamma.sum()
         free_energy /= target.size
 
         # kl /= target.size
@@ -197,10 +217,10 @@ class RPMLDS(RPM):
 
         if samples is None:
 
+            # https://en.wikipedia.org/wiki/Trace_(linear_algebra)#Trace_of_a_product
             # tr(prior_precision @ posterior_covariance)
             # the trace of a matrix product is the sum of the elements of the Hadamard product 
             # subblocks with zero prior precision (i.e. those not on the tridiagonal) can therefore be ignored
-            # https://en.wikipedia.org/wiki/Trace_(linear_algebra)#Trace_of_a_product
             cross_entropy = 0.5 * np.einsum("tij,tij->", prior_params["J"], posterior.smoothed_covariances)
             Sigmatnt = posterior.expected_states_next_states.transpose((0, 2, 1)) - np.einsum("ti,tj->tji", posterior.expected_states[:-1], posterior.expected_states[1:])
             cross_entropy += np.einsum("tij,tij->", prior_params["L"], Sigmatnt) # no 0.5 weighting because this term is counted twice (once for the lower diagonal and once for the upper diagonal)

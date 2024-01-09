@@ -15,6 +15,8 @@ from svae.utils import dynamics_to_tridiag
 
 from dynamax.utils.utils import psd_solve
 
+import control
+
 class SVAEPrior:
     def init(self, key):
         """
@@ -84,8 +86,9 @@ class LinearGaussianChainPrior(SVAEPrior):
         p = copy.deepcopy(params)
         tridiag = dynamics_to_tridiag(params, self.seq_len, self.latent_dims)
         p.update(tridiag)
+        b = u[:-1] @ p["B"].T
         dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
-                                         p["A"], p["B"], u, p["Q"], self.seq_len)
+                                         p["A"], b, p["Q"], self.seq_len)
         p.update({
             "As": dist._dynamics_matrix,
             "bs": dist._dynamics_bias,
@@ -104,6 +107,52 @@ class LinearGaussianChainPrior(SVAEPrior):
         #     "prior_J": prior_J,
         #     "prior_h": prior_h
         # })
+
+        return p
+
+    def get_marginals_under_optimal_control(self, params, u):
+        p = copy.deepcopy(params)
+
+        x_goal = 
+        u_eq = np.linalg.solve(p["B"], (np.eye(self.latent_dims) - p["A"]) @ x_goal)
+
+        # get feedback gain matrix K
+        Q_lqr = np.eye(self.latent_dims)
+        R_lqr = np.eye(self.latent_dims)
+        K, _, _ = control.dlqr(["A"], p["B"], Q_lqr, R_lqr)
+
+        # dynamics under optimal feedback control
+        # x' = A @ x + B @ (u + u_eq)
+        # x' = A @ x + B @ u + B @ u_eq
+        # x' = A x - B @ K @ (x - x_goal) + B @ u_eq
+        # x' = A x - B @ K @ x + B @ K @ x_goal + B @ u_eq
+        # x' = (A - B @ K) @ x + B @ (K @ x_goal + u_eq)
+        # x' = A_opt @ x + b_opt
+        A_opt = p["A"] - p["B"] @ K
+        b_opt = np.tile(p["B"] @ (K @ x_goal + u_eq), (self.seq_len - 1, 1))
+
+        (f + popt) - popt
+
+        dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
+                                         A_opt, b_opt, p["Q"], self.seq_len)
+        p.update({
+            "As": dist._dynamics_matrix,
+            "bs": dist._dynamics_bias,
+            "Qs": dist._noise_covariance,
+            "Ex": dist.expected_states,
+            "Sigma": dist.covariance,
+            "ExxT": dist.expected_states_squared,
+            "ExnxT": dist.expected_states_next_states
+        })
+
+        # natural parameters of prior marginals
+        prior_J = psd_solve(p["Sigma"], np.eye(self.latent_dims)[None])
+        prior_h = prior_J @ p["Ex"]
+
+        p.update({
+            "prior_J": prior_J,
+            "prior_h": prior_h
+        })
 
         return p
 
