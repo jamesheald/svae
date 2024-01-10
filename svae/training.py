@@ -222,12 +222,12 @@ class Trainer:
         if update is not None: 
             self.update = update
 
-    def train_step(self, key, params, data, target, u, opt_states, itr, K):
+    def train_step(self, key, params, data, target, u, opt_states, itr):
         model = self.model
         results = \
             jax.value_and_grad(
                 lambda params: partial(self.loss, itr=itr, **self.train_params)\
-                (key, model, data, target, u, params, K), has_aux=True)(params)
+                (key, model, data, target, u, params), has_aux=True)(params)
         (loss, aux), grads = results
         params, opts = self.update(params, grads, self.opts, opt_states, model, aux, **self.train_params)
         return params, opts, (loss, aux), grads
@@ -334,22 +334,11 @@ class Trainer:
                 # ----------------------------------------
                 batch_indices = indices[batch_start:batch_start+batch_size]
 
-                # compute optimal feedback gain matrix K
-                prior_params = self.model.prior.get_constrained_params(self.params["prior_params"], np.empty((train_data.shape[1],1)))
-                p = copy.deepcopy(prior_params)
-                latent_dims = 3
-                u_dims = 1
-                Q_lqr = np.eye(latent_dims)
-                R_lqr = np.eye(u_dims) * 1e-3
-                S = np.zeros((latent_dims, u_dims))
-                X = solve_discrete_are(p["A"], p["B"], Q_lqr, R_lqr, e=None, s=S)
-                K = solve(p["B"].T @ X @ p["B"] + R_lqr, p["B"].T @ X @ p["A"] + S.T)
-
                 step_results = train_step(train_key, self.params, 
                                train_data[batch_indices],
                                train_targets[batch_indices], 
                                train_u[batch_indices], 
-                               self.opt_states, itr, K)
+                               self.opt_states, itr)
                 self.params, self.opt_states, loss_out, grads = step_results#\
                     # jax.tree_map(lambda x: x.block_until_ready(), step_results)
                 # ----------------------------------------
@@ -516,12 +505,32 @@ def svae_init(key, model, data, initial_params=None, **train_params):
             all_opt_states,
             mngr)
     
-def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, K, itr=0, **train_params):
+def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0, **train_params):
     batch_size = data_batch.shape[0]
     n_timepoints = data_batch.shape[1]
     # Axes specification for vmap
     # We're just going to ignore this for now
-    RPM_batch = model.recognition.apply(model_params["rec_params"], data_batch - np.array([1., 0., 0.])[None, None, :]) # shift obs so that the goal is [0, 0, 0]; obs are [cos(theta), sin(theta), theta_dot], where theta = 0 is upright (the goal)
+    RPM_batch = model.recognition.apply(model_params["rec_params"], data_batch)
+    RPM_goal = model.recognition.apply(model_params["rec_params"], np.array([1., 0., 0.])) # obs are [cos(theta), sin(theta), theta_dot], where theta = 0 is upright (the goal)
+    
+
+    # compute optimal feedback gain matrix K
+    prior_params = model.prior.get_constrained_params(model_params["prior_params"], np.empty((n_timepoints,1)))
+    p = copy.deepcopy(prior_params)
+    latent_dims = 3 ######## TO CHANGE
+    u_dims = 1 ######## TO CHANGE
+    Q_lqr = np.eye(latent_dims) ######## TO CHANGE
+    R_lqr = np.eye(u_dims) * 1e-3 ######## TO CHANGE
+
+    x_goal = (np.linalg.solve(p["A"] - np.eye(latent_dims), p["B"])).squeeze()
+    x_goal /= np.linalg.norm(x_goal)
+    x_goal *= p["goal_norm"]
+    (u_eq, _, _, _) = np.linalg.lstsq(p["B"], (np.eye(latent_dims) - p["A"]) @ x_goal)
+
+    # shift the mean/precision-weighted mean of all RPM potentials so that the mean of the inferred hidden state for the goal is at x_goal
+    delta_mu = x_goal - RPM_goal['mu']
+    RPM_batch['mu'] = vmap(vmap(lambda mu, delta_mu: mu + delta_mu, in_axes=(0, None)), in_axes=(0, None))(RPM_batch['mu'], delta_mu)
+    RPM_batch['h'] = vmap(vmap(lambda J, h, delta_mu: h + J @ delta_mu, in_axes=(0, 0, None)), in_axes=(0, 0, None))(RPM_batch['J'], RPM_batch['h'], delta_mu)
 
     # moment matched approximation to F
     # https://math.stackexchange.com/questions/195911/calculation-of-the-covariance-of-gaussian-mixtures
@@ -535,7 +544,8 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, K, it
     # x_goal = model.recognition.apply(model_params["rec_params"], np.array([1., 0., 0.])) # cos(theta), sin(theta), theta_dot (theta = 0 is upright)
     prior_params = model.prior.get_constrained_params(model_params["prior_params"], np.empty((n_timepoints,1)))
     # optimal_prior_params = model.prior.get_marginals_under_optimal_control(prior_params, x_goal['mu'])
-    optimal_prior_params = model.prior.get_marginals_under_optimal_control(prior_params, K)
+    K = model.prior.get_optimal_feedback_gain(p["A"], p["B"], Q_lqr, R_lqr)
+    optimal_prior_params = model.prior.get_marginals_under_optimal_control(prior_params, x_goal, u_eq, K)
 
     result = vmap(partial(model.compute_objective, **train_params), 
                   in_axes=(0, 0, 0, 0, 0, None, None, None))\

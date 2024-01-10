@@ -141,8 +141,8 @@ class RPM:
         
         # expected log auxiliary factors < log \tilde{f} >
         # Murphy section 2.3.2.5
-        auxillary_J = optimal_prior_params["J"] - posterior_J
-        auxillary_h = optimal_prior_params["h"] - posterior_h
+        auxillary_J = optimal_prior_params["prior_J"] - posterior_J
+        auxillary_h = optimal_prior_params["prior_h"] - posterior_h
         E_log_aux = np.einsum("ij,ij->i", auxillary_h, post_Ex) - 0.5 * (np.einsum("ij,ij->i", post_Ex, np.einsum("ijk,ik->ij", auxillary_J, post_Ex)) + (auxillary_J * post_Sigma).sum(axis = (1, 2)))
 
         # use the current plus one random data point
@@ -162,7 +162,7 @@ class RPM:
 
         normalised_auxillary_log_normaliser = self.log_normaliser(normalised_auxillary_J, normalised_auxillary_h)
         # RPM_log_normaliser = self.log_normaliser(RPM_J, RPM_h)
-        RPM_log_normaliser = self.log_normaliser(optimal_prior_params["J"] + RPM_J, optimal_prior_params["h"] + RPM_h)
+        RPM_log_normaliser = self.log_normaliser(optimal_prior_params["prior_J"] + RPM_J, optimal_prior_params["prior_h"] + RPM_h)
 
         log_Gamma = logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0, b=np.array([1, batch_size - 1])[:, None].repeat(timepoints, axis = 1)/batch_size)
 
@@ -205,10 +205,10 @@ class RPM:
 class RPMLDS(RPM):
     def kl_posterior_rpmfactors(self, optimal_prior_params, RPM_batch, batch_id, posterior, posterior_entropy):
 
-        rpm_J = optimal_prior_params["J"] + RPM_batch["J"][batch_id]
-        rpm_h = optimal_prior_params["h"] + RPM_batch["h"][batch_id]
-        rpm_Sigma = psd_solve(rpm_J, np.eye(self.prior.latent_dims)[None])
-        rpm_mu = rpm_Sigma @ rpm_h
+        rpm_J = optimal_prior_params["prior_J"] + RPM_batch["J"][batch_id]
+        rpm_h = optimal_prior_params["prior_h"] + RPM_batch["h"][batch_id]
+        rpm_Sigma = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(rpm_J, np.eye(self.prior.latent_dims))
+        rpm_mu = np.einsum("ijk,ik->ij", rpm_Sigma, rpm_h)
 
         cross_entropy = 0.5 * np.einsum("tij,tij->", rpm_J, posterior.smoothed_covariances)
         cross_entropy -= MVN(loc=rpm_mu, covariance_matrix=rpm_Sigma).log_prob(posterior.expected_states).sum()

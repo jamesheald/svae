@@ -3,6 +3,8 @@ from copy import deepcopy
 
 import jax.numpy as np
 import jax.random as jr
+from jax import vmap
+from jax.lax import while_loop
 key_0 = jr.PRNGKey(0)
 
 # Tensorflow probability
@@ -108,7 +110,29 @@ class LinearGaussianChainPrior(SVAEPrior):
 
         return p
 
-    def get_marginals_under_optimal_control(self, params, K):
+    def cond_fun(self, x, eps = 1e-6):
+
+        P, delta_P_norm, A, B, Q, R = x
+
+        return delta_P_norm > eps
+
+    def get_previous_P(self, x):
+
+        P, delta_P_norm, A, B, Q, R = x
+
+        prev_P = Q + A.T @ P @ A - (A.T @ P @ B) @ np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+
+        return prev_P, np.linalg.norm(P - prev_P), A, B, Q, R
+
+    def get_optimal_feedback_gain(self, A, B, Q, R):
+
+        init_val = Q, 1e3, A, B, Q, R
+        P, _, _, _, _, _ = while_loop(self.cond_fun, self.get_previous_P, init_val) # iterate until P converges
+        K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
+
+        return K
+
+    def get_marginals_under_optimal_control(self, params, x_goal, u_eq, K):
         p = copy.deepcopy(params)
 
         # u_eq = np.linalg.solve(p["B"], (np.eye(self.latent_dims) - p["A"]) @ x_goal)
@@ -121,8 +145,8 @@ class LinearGaussianChainPrior(SVAEPrior):
         # x' = (A - B @ K) @ x + B @ (K @ x_goal + u_eq)
         # x' = A_opt @ x + b_opt
         A_opt = p["A"] - p["B"] @ K
-        # b_opt = np.tile(p["B"] @ (K @ x_goal + u_eq), (self.seq_len - 1, 1))
-        b_opt = np.tile(np.zeros(self.latent_dims), (self.seq_len - 1, 1))
+        b_opt = np.tile(p["B"] @ (K @ x_goal + u_eq), (self.seq_len - 1, 1))
+        # b_opt = np.tile(np.zeros(self.latent_dims), (self.seq_len - 1, 1))
 
         dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
                                          A_opt, b_opt, p["Q"], self.seq_len)
@@ -137,8 +161,8 @@ class LinearGaussianChainPrior(SVAEPrior):
         })
 
         # natural parameters of prior marginals
-        prior_J = psd_solve(p["Sigma"], np.eye(self.latent_dims)[None])
-        prior_h = prior_J @ p["Ex"]
+        prior_J = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(p["Sigma"], np.eye(self.latent_dims))
+        prior_h = np.einsum("ijk,ik->ij", prior_J, p["Ex"])
 
         p.update({
             "prior_J": prior_J,
@@ -171,7 +195,8 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
             "Q1": Q1_flat,
             "B": jr.normal(key_B, (D, U)),
             # "Q": np.zeros(D),
-            "Q": Q_flat
+            "Q": Q_flat,
+            "goal_norm": np.ones(1)
         }
         return params
 
@@ -183,8 +208,9 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
             "A": construct_dynamics_matrix(params["A_u"], params["A_v"], params["A_s"], self.latent_dims),
             "B": scale_matrix_by_norm(params["B"]),
             # "B":params["B"],
-            "Q": lie_params_to_constrained(params["Q"], self.latent_dims)   
-            # "Q":  np.diag(np.exp(params["Q"]))   
+            "Q": lie_params_to_constrained(params["Q"], self.latent_dims),  
+            # "Q":  np.diag(np.exp(params["Q"]))
+            "goal_norm": params["goal_norm"],
         }
 
     def get_constrained_params(self, params, u):
