@@ -15,8 +15,6 @@ from svae.utils import dynamics_to_tridiag
 
 from dynamax.utils.utils import psd_solve
 
-import control
-
 class SVAEPrior:
     def init(self, key):
         """
@@ -110,28 +108,21 @@ class LinearGaussianChainPrior(SVAEPrior):
 
         return p
 
-    def get_marginals_under_optimal_control(self, params, u):
+    def get_marginals_under_optimal_control(self, params, K):
         p = copy.deepcopy(params)
 
-        x_goal = 
-        u_eq = np.linalg.solve(p["B"], (np.eye(self.latent_dims) - p["A"]) @ x_goal)
-
-        # get feedback gain matrix K
-        Q_lqr = np.eye(self.latent_dims)
-        R_lqr = np.eye(self.latent_dims)
-        K, _, _ = control.dlqr(["A"], p["B"], Q_lqr, R_lqr)
+        # u_eq = np.linalg.solve(p["B"], (np.eye(self.latent_dims) - p["A"]) @ x_goal)
 
         # dynamics under optimal feedback control
         # x' = A @ x + B @ (u + u_eq)
         # x' = A @ x + B @ u + B @ u_eq
-        # x' = A x - B @ K @ (x - x_goal) + B @ u_eq
-        # x' = A x - B @ K @ x + B @ K @ x_goal + B @ u_eq
+        # x' = A @ x - B @ K @ (x - x_goal) + B @ u_eq
+        # x' = A @ x - B @ K @ x + B @ K @ x_goal + B @ u_eq
         # x' = (A - B @ K) @ x + B @ (K @ x_goal + u_eq)
         # x' = A_opt @ x + b_opt
         A_opt = p["A"] - p["B"] @ K
-        b_opt = np.tile(p["B"] @ (K @ x_goal + u_eq), (self.seq_len - 1, 1))
-
-        (f + popt) - popt
+        # b_opt = np.tile(p["B"] @ (K @ x_goal + u_eq), (self.seq_len - 1, 1))
+        b_opt = np.tile(np.zeros(self.latent_dims), (self.seq_len - 1, 1))
 
         dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
                                          A_opt, b_opt, p["Q"], self.seq_len)

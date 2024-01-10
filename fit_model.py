@@ -51,12 +51,14 @@ run_params = {
     "checkpoint_every_n_epochs": 5, # 10
     "log_to_wandb": False,
     "log_every_n_epochs": 10,
-    "save_dir": "/Users/james/Dropbox (UCL)/ucgtjhe@ucl.ac.uk’s files/James MacBook/Gatsby/svae/runs/first_attempt",
-    "reload_dir": "/Users/james/Dropbox (UCL)/ucgtjhe@ucl.ac.uk’s files/James MacBook/Gatsby/svae/runs/first_attempt",
+    "save_dir": "/nfs/nhome/live/jheald/svae/runs/first_attempt",
+    "reload_dir": "/nfs/nhome/live/jheald/svae/runs/first_attempt",
     "reload_state": False,
     "project_name": "SVAE-control-pendulum",
     "run_type": "model_learning" # model_learning
 }
+# "save_dir": "/Users/james/Dropbox (UCL)/ucgtjhe@ucl.ac.uk’s files/James MacBook/Gatsby/svae/runs/first_attempt",
+# "reload_dir": "/Users/james/Dropbox (UCL)/ucgtjhe@ucl.ac.uk’s files/James MacBook/Gatsby/svae/runs/first_attempt",
 
 all_results, all_models = run_pendulum_control(run_params)
 # all_results[0]: trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.opts, trainer.opt_states, trainer.ckptrs
