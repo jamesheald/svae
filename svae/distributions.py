@@ -314,7 +314,7 @@ class LinearGaussianSSM(tfd.Distribution):
     def covariance(self):
         return self.smoothed_covariances
 
-    # TODO: currently this function does not depend on the dynamics bias
+    
     def _log_prob(self, data, u, **kwargs):
         A = self._dynamics_matrix  # params["A"]
         B = self._input_matrix  # params["B"]
@@ -324,17 +324,16 @@ class LinearGaussianSSM(tfd.Distribution):
 
         num_batch_dims = len(data.shape) - 2
 
+        # here log_prob under the full joint across all time is calculated by exploiting the Markov structure
         ll = np.sum(
             MVN(loc=np.einsum("ij,...tj->...ti", A, data[..., :-1, :]) + np.einsum("ij,...tj->...ti", B, u[..., :-1, :]),
                 covariance_matrix=Q).log_prob(data[..., 1:, :])
         )
         ll += MVN(loc=m1, covariance_matrix=Q1).log_prob(data[..., 0, :])
 
-        # Add the observation potentials
-        # ll += - 0.5 * np.einsum("...ti,tij,...tj->...", data, self._emissions_precisions, data) \
-        #       + np.einsum("...ti,ti->...", data, self._emissions_linear_potentials)
         ll += np.sum(MVN(loc=self._emissions_means,
                          covariance_matrix=self._emissions_covariances).log_prob(data), axis=-1)
+
         # Add the log normalizer
         ll -= self._log_normalizer
 

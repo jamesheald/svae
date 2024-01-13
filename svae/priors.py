@@ -4,7 +4,7 @@ from copy import deepcopy
 import jax.numpy as np
 import jax.random as jr
 from jax import vmap
-from jax.lax import while_loop
+from jax.lax import scan
 key_0 = jr.PRNGKey(0)
 
 # Tensorflow probability
@@ -110,25 +110,44 @@ class LinearGaussianChainPrior(SVAEPrior):
 
         return p
 
-    def cond_fun(self, x, eps = 1e-6):
+    # def cond_fun(self, x, eps = 1e-6):
 
-        P, delta_P_norm, A, B, Q, R = x
+    #     P, delta_P_norm, A, B, Q, R = x
 
-        return delta_P_norm > eps
+    #     return delta_P_norm > eps
 
-    def get_previous_P(self, x):
+    # def get_previous_P(self, x):
 
-        P, delta_P_norm, A, B, Q, R = x
+    #     P, delta_P_norm, A, B, Q, R = x
+
+    #     prev_P = Q + A.T @ P @ A - (A.T @ P @ B) @ np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+
+    #     return prev_P, np.linalg.norm(P - prev_P), A, B, Q, R
+
+    # def get_optimal_feedback_gain(self, A, B, Q, R):
+
+    #     init_val = Q, 1e3, A, B, Q, R
+    #     P, _, _, _, _, _ = while_loop(self.cond_fun, self.get_previous_P, init_val) # iterate until P converges
+    #     K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
+
+    #     return K
+
+    def get_previous_P(self, carry, inputs):
+
+        P, A, B, Q, R = carry
 
         prev_P = Q + A.T @ P @ A - (A.T @ P @ B) @ np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
 
-        return prev_P, np.linalg.norm(P - prev_P), A, B, Q, R
+        carry = prev_P, A, B, Q, R
+        outputs = None
+
+        return carry, outputs
 
     def get_optimal_feedback_gain(self, A, B, Q, R):
 
-        init_val = Q, 1e3, A, B, Q, R
-        P, _, _, _, _, _ = while_loop(self.cond_fun, self.get_previous_P, init_val) # iterate until P converges
-        K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
+        carry = Q, A, B, Q, R
+        (P, _, _, _, _), _ = scan(self.get_previous_P, carry, None, length=100)
+        K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
 
         return K
 

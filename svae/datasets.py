@@ -159,19 +159,17 @@ def load_pendulum_control_data(run_params):
     obj = pickle.load(open("pendulum_data.pkl", 'rb'))
 
     sigma = 0
-    N_train = 800
-    N_val = 200
-    # N_train = 10
-    # N_val = 10
+    train_size = run_params['train_size']
+    val_size = run_params['val_size']
 
     data_dict = {}
-    data_dict["train_data"] = np.array(obj['observations'][:N_train, :, :])
+    data_dict["train_data"] = np.array(obj['observations'][:train_size, :, :])
     data_dict["train_data"] += jr.normal(jr.PRNGKey(0), data_dict["train_data"].shape) * sigma
-    data_dict["train_u"] = np.array(obj['u'][:N_train, :, None])
+    data_dict["train_u"] = np.array(obj['u'][:train_size, :, None])
     data_dict["train_u"] += jr.normal(jr.PRNGKey(1), data_dict["train_u"].shape) * sigma
-    data_dict["val_data"] =  np.array(obj['observations'][-N_val:, :, :])
+    data_dict["val_data"] =  np.array(obj['observations'][-val_size:, :, :])
     data_dict["val_data"] += jr.normal(jr.PRNGKey(2), data_dict["val_data"].shape) * sigma
-    data_dict["val_u"] = np.array(obj['u'][-N_val:, :, None])
+    data_dict["val_u"] = np.array(obj['u'][-val_size:, :, None])
     data_dict["val_u"] += jr.normal(jr.PRNGKey(3), data_dict["val_u"].shape) * sigma
 
     data_dict["train_data"] = normalise(data_dict["train_data"], np.min(obj['observations'], axis = (0, 1)), np.max(obj['observations'], axis = (0, 1)))

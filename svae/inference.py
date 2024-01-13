@@ -61,22 +61,17 @@ def _make_associative_filtering_elements(params, potentials, u):
     """Preprocess observations to construct input for filtering assocative scan."""
     # https://arxiv.org/pdf/1905.13002.pdf
 
-    def _first_filtering_element(params, mu, Sigma, u0):
+    def _first_filtering_element(params, mu, Sigma):
 
         F = params["A"]
         B = params["B"]
         Q = params["Q"]
-        P0 = params["Q1"]
-        m0 = params["m1"]
+        P1 = params["Q1"]
+        m1 = params["m1"]
         dim = Q.shape[0]
         H = np.eye(dim)
 
         y, R = mu, Sigma
-
-        Bu = (B * u0).squeeze()
-
-        m1 = F @ m0 + Bu
-        P1 = F @ P0 @ F.T + Q
 
         S1 = H @ P1 @ H.T + R
         K1 = psd_solve(S1, H @ P1).T
@@ -85,8 +80,13 @@ def _make_associative_filtering_elements(params, potentials, u):
         b = m1 + K1 @ (y - H @ m1)
         C = P1 - K1 @ S1 @ K1.T
         
-        eta = F.T @ H.T @ psd_solve(S1, y - H @ Bu)
+        eta = F.T @ H.T @ psd_solve(S1, y)
         J = F.T @ H.T @ psd_solve(S1, H @ F)
+
+        # I think the below code is wrong (it calculates S as in _generic_filtering_element, as if for trial k > 1)
+        # S = H @ Q @ H.T + R
+        # eta = F.T @ H.T @ psd_solve(S, y)
+        # J = F.T @ H.T @ psd_solve(S, H @ F)
 
         return A, b, C, J, eta
 
@@ -116,8 +116,8 @@ def _make_associative_filtering_elements(params, potentials, u):
 
     mus, Sigmas = potentials["mu"], potentials["Sigma"]
 
-    first_elems = _first_filtering_element(params, mus[0], Sigmas[0], u[0])
-    generic_elems = vmap(_generic_filtering_element, (None, 0, 0, 0))(params, mus[1:], Sigmas[1:], u[1:])
+    first_elems = _first_filtering_element(params, mus[0], Sigmas[0])
+    generic_elems = vmap(_generic_filtering_element, (None, 0, 0, 0))(params, mus[1:], Sigmas[1:], u[:-1])
     combined_elems = tuple(np.concatenate((first_elm[None,...], gen_elm))
                            for first_elm, gen_elm in zip(first_elems, generic_elems))
     return combined_elems
@@ -175,8 +175,8 @@ def _make_associative_smoothing_elements(params, filtered_means, filtered_covari
 
         Pp = F @ P @ F.T + Q
 
-        E  = psd_solve(Pp, F @ P).T
-        g  = m - E @ (F @ m + B @ u)
+        E = psd_solve(Pp, F @ P).T
+        g = m - E @ (F @ m + B @ u)
         L = P - E @ F @ P
 
         return E, g, L

@@ -361,6 +361,14 @@ class Trainer:
                 # print("max ells episode", max_ells[0])
                 # print("max ells time point", max_ells[1])
 
+                print("kl_qp mean", aux['kl_qp'].mean())
+                print("kl_qf mean", aux['kl_qf'].mean())
+                # print("E_log_aux mean", aux['E_log_aux'].mean())
+                # print("E_log_aux1 mean", aux['E_log_aux1'].mean())
+                # print("E_log_aux2 mean", aux['E_log_aux2'].mean())
+                # print("E_log_aux3 mean", aux['E_log_aux3'].mean())
+                print("log_Gamma mean", aux['log_Gamma'].mean())
+
                 # print("A", self.params['prior_params']['A'])
                 # print("B", self.params['prior_params']['B'])
                 # print("Q", self.params['prior_params']['Q'])
@@ -513,7 +521,6 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0
     RPM_batch = model.recognition.apply(model_params["rec_params"], data_batch)
     RPM_goal = model.recognition.apply(model_params["rec_params"], np.array([1., 0., 0.])) # obs are [cos(theta), sin(theta), theta_dot], where theta = 0 is upright (the goal)
     
-
     # compute optimal feedback gain matrix K
     prior_params = model.prior.get_constrained_params(model_params["prior_params"], np.empty((n_timepoints,1)))
     p = copy.deepcopy(prior_params)
@@ -524,11 +531,11 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, itr=0
 
     x_goal = (np.linalg.solve(p["A"] - np.eye(latent_dims), p["B"])).squeeze()
     x_goal /= np.linalg.norm(x_goal)
-    x_goal *= p["goal_norm"]
+    x_goal *= p["goal_norm"] ######## don't make goal unit norm away from origin
     (u_eq, _, _, _) = np.linalg.lstsq(p["B"], (np.eye(latent_dims) - p["A"]) @ x_goal)
 
     # shift the mean/precision-weighted mean of all RPM potentials so that the mean of the inferred hidden state for the goal is at x_goal
-    delta_mu = x_goal - RPM_goal['mu']
+    delta_mu = (x_goal - RPM_goal['mu'])
     RPM_batch['mu'] = vmap(vmap(lambda mu, delta_mu: mu + delta_mu, in_axes=(0, None)), in_axes=(0, None))(RPM_batch['mu'], delta_mu)
     RPM_batch['h'] = vmap(vmap(lambda J, h, delta_mu: h + J @ delta_mu, in_axes=(0, 0, None)), in_axes=(0, 0, None))(RPM_batch['J'], RPM_batch['h'], delta_mu)
 

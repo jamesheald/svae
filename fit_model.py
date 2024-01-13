@@ -11,9 +11,9 @@
 # dynamics matrix minus eye for stability hacky
 
 from jax import config
-config.update("jax_enable_x64", True)
-config.update("jax_debug_nans", True)
-config.update("jax_disable_jit", True)
+# config.update("jax_enable_x64", True)
+# config.update("jax_debug_nans", True)
+# config.update("jax_disable_jit", True)
 
 from svae.experiments import run_pendulum_control
 import jax.random as jr
@@ -31,8 +31,10 @@ run_params = {
     "seed": jr.PRNGKey(1),
     "sample_kl": False,
     "use_parallel_kf": True,
-    "train_batch_size": 800,
-    "val_batch_size": 200,
+    "train_size": 20, # 800
+    "val_size": 5, # 200
+    "train_batch_size": 20,
+    "val_batch_size": 5,
     "num_timesteps": 100,
     "mask_size": 0,
     "mask_start": 0,
@@ -60,7 +62,7 @@ run_params = {
     "run_type": "model_learning" # model_learning
 }
 
-all_results, all_models = run_pendulum_control(run_params)
+# all_results, all_models = run_pendulum_control(run_params)
 # all_results[0]: trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.opts, trainer.opt_states, trainer.ckptrs
 
 # all_results[0][0] # model deepLDS object (? == all_models[0]['model'])
@@ -70,10 +72,12 @@ all_results, all_models = run_pendulum_control(run_params)
 # all_models[0]['trainer'] # Trainer object
 # all_models[0]['model'].prior.get_dynamics_params()
 
+# breakpoint()
+
 from matplotlib import pyplot as plt
-plt.plot(all_results[0][2] ,'r') # train loss
-plt.plot(all_results[0][3], 'b') # val loss
-plt.show(block = False)
+# plt.plot(all_results[0][2] ,'r') # train loss
+# plt.plot(all_results[0][3], 'b') # val loss
+# plt.show(block = False)
 
 run_params['run_type'] = 'none'
 run_params["reload_state"] = True
@@ -81,14 +85,7 @@ all_results, all_models = run_pendulum_control(run_params)
 
 import numpy as np
 from svae.utils import lie_params_to_constrained, construct_dynamics_matrix, scale_matrix_by_norm
-import pickle
-
-obj = pickle.load(open("pendulum_data.pkl", 'rb'))
-data_dict = {}
-data_dict["train_data"] = np.array(obj['observations'][:800, :, :])
-data_dict["train_u"] = np.array(obj['u'][:800, :-1, None])
-data_dict["val_data"] =  np.array(obj['observations'][800:, :, :])
-data_dict["val_u"] = np.array(obj['u'][800:, :-1, None])
+from svae.datasets import load_pendulum_control_data
 
 def normalise(t, t_min, t_max):
 
@@ -98,10 +95,14 @@ def unnormalise(t, t_min, t_max):
 
     return t_min + t * (t_max - t_min) - 0.5
 
-data_dict["train_data"] = normalise(data_dict["train_data"], np.min(data_dict["train_data"], axis = (0, 1)), np.max(data_dict["train_data"], axis = (0, 1)))
-data_dict["train_u"] = normalise(data_dict["train_u"], np.min(data_dict["train_u"], axis = (0, 1)), np.max(data_dict["train_u"], axis = (0, 1)))
-data_dict["val_data"] = normalise(data_dict["val_data"], np.min(data_dict["val_data"], axis = (0, 1)), np.max(data_dict["val_data"], axis = (0, 1)))
-data_dict["val_u"] = normalise(data_dict["val_u"], np.min(data_dict["val_u"], axis = (0, 1)), np.max(data_dict["val_u"], axis = (0, 1)))
+import pickle
+obj = pickle.load(open("pendulum_data.pkl", 'rb'))
+min_ob = np.min(obj['observations'], axis = (0, 1))
+max_ob = np.max(obj['observations'], axis = (0, 1))
+min_u = np.min(obj['u'], axis = (0, 1))
+max_u = np.max(obj['u'], axis = (0, 1))
+
+data_dict = load_pendulum_control_data(run_params)
 
 n_timepoints = 100
 z_dim = 3
@@ -115,54 +116,163 @@ B = scale_matrix_by_norm(all_results[0][1]['prior_params']['B'])
 Q = lie_params_to_constrained(all_results[0][1]['prior_params']['Q'], z_dim)
 # Q = np.diag(np.exp(all_results[0][1]['prior_params']['Q']))
 
-episode = 0
-y = data_dict["train_data"][episode, :, :]
-control = data_dict["train_u"][episode, :]
-m = np.zeros((z_dim, n_timepoints))
-m[:, 0] = m1
-P = np.zeros((z_dim, z_dim, n_timepoints))
-P[:, :, 0] = Q1
-y_recon = np.zeros((n_timepoints, y_dim))
+normalised_goal = normalise(np.array([1., 0., 0.]), min_ob, max_ob)
+RPM_goal = all_models[0]['model'].recognition.apply(all_results[0][1]['rec_params'], normalised_goal) # obs are [cos(theta), sin(theta), theta_dot], where theta = 0 is upright (the goal)
+# compute optimal feedback gain matrix K
+prior_params = all_models[0]['model'].prior.get_dynamics_params(all_results[0][1]['prior_params'])
+import copy
+p = copy.deepcopy(prior_params)
+latent_dims = 3 ######## TO CHANGE
+u_dims = 1 ######## TO CHANGE
+Q_lqr = np.eye(latent_dims) ######## TO CHANGE
+R_lqr = np.eye(u_dims) * 1e-3 ######## TO CHANGE
+x_goal = (np.linalg.solve(p["A"] - np.eye(latent_dims), p["B"])).squeeze()
+x_goal /= np.linalg.norm(x_goal)
+x_goal *= p["goal_norm"] ######## don't make goal unit norm away from origin
+(u_eq, _, _, _) = np.linalg.lstsq(p["B"], (np.eye(latent_dims) - p["A"]) @ x_goal)
+# shift the mean/precision-weighted mean of all RPM potentials so that the mean of the inferred hidden state for the goal is at x_goal
+delta_mu = x_goal - RPM_goal['mu']
+
+def filter_observation(models, params, m, P, y, delta_mu):
+
+    rec = models.recognition.apply(params['rec_params'], y)
+    e = rec['mu'] + delta_mu - m
+    S = P + rec['Sigma']
+    K = np.linalg.solve(S, P).T
+    m += K @ e
+    P = (np.eye(m.size) - K) @ P
+
+    return m, P
+
+def get_control(m, K):
+
+    u = - K @ m
+
+    return u
+
+def predict_next_state(m, P, A, B, u, Q):
+
+    m = A @ m + B @ u
+    P = A @ P @ A.T + Q
+
+    return m, P
+
+n_rollouts = 1
+m = np.zeros((n_rollouts, z_dim, n_timepoints))
+P = np.zeros((n_rollouts, z_dim, z_dim, n_timepoints))
+m[:, :, 0] = m1[None].repeat(n_rollouts, axis = 0)
+P[:, :, :, 0] = Q1[None].repeat(n_rollouts, axis = 0)
+if run_params["inference_method"] != "rpm":
+    y_recon = np.zeros((n_rollouts, n_timepoints, y_dim))
 observations_present = True
-for t in range(n_timepoints - 1):
-    if observations_present:
-        rec = all_models[0]['model'].recognition.apply(all_results[0][1]['rec_params'], y[t, :])
-        e = rec['mu'] - m[:, t]
-        S = P[:, :, t] + rec['Sigma']
-        K = np.linalg.solve(S, P[:, :, t]).T
-        m[:, t] += K @ e
-        P[:, :, t] = (np.eye(z_dim) - K) @ P[:, :, t]
-    y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
-    m[:, t + 1] = A @ m[:, t] + B @ control[t]
-    P[:, :, t + 1] = A @ P[:, :, t] @ A.T + Q
+for r in range(n_rollouts):
+    y = data_dict["train_data"][r, :, :]
+    u = data_dict["train_u"][r, :]
+    for t in range(n_timepoints - 1):
+        if observations_present:
+            obs = normalise(y[t, :], min_ob, max_ob)
+            m[r, :, t], P[r, :, :, t] = filter_observation(all_models[0]['model'], all_results[0][1], m[r, :, t], P[r, :, :, t], obs, delta_mu)
+        if run_params["inference_method"] != "rpm":
+            y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
+        action = normalise(u[r, t][None], min_u, max_u)
+        m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, action, Q)
 plt.figure()
 plt.plot(y, 'r')
-plt.plot(y_recon, 'b--')
+plt.plot(m[0, :, :].T, 'g--')
+if run_params["inference_method"] != "rpm":
+    plt.plot(y_recon, 'b--')
 plt.show(block = False)
 
-episode = 0
-y = data_dict["train_data"][episode, :, :]
-control = data_dict["train_u"][episode, :]
-m = np.zeros((z_dim, n_timepoints))
-m[:, 0] = m1
-P = np.zeros((z_dim, z_dim, n_timepoints))
-P[:, :, 0] = Q1
-y_recon = np.zeros((n_timepoints, y_dim))
+n_rollouts = 1
+m = np.zeros((n_rollouts, z_dim, n_timepoints))
+P = np.zeros((n_rollouts, z_dim, z_dim, n_timepoints))
+m[:, :, 0] = m1[None].repeat(n_rollouts, axis = 0)
+P[:, :, :, 0] = Q1[None].repeat(n_rollouts, axis = 0)
+if run_params["inference_method"] != "rpm":
+    y_recon = np.zeros((n_rollouts, n_timepoints, y_dim))
 observations_present = False
-for t in range(n_timepoints - 1):
-    if observations_present:
-        rec = all_models[0]['model'].recognition.apply(all_results[0][1]['rec_params'], y[t, :])
-        e = rec['mu'] - m[:, t]
-        S = P[:, :, t] + rec['Sigma']
-        K = np.linalg.solve(S, P[:, :, t]).T
-        m[:, t] += K @ e
-        P[:, :, t] = (np.eye(z_dim) - K) @ P[:, :, t]
-    y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
-    m[:, t + 1] = A @ m[:, t] + B @ control[t]
-    P[:, :, t + 1] = A @ P[:, :, t] @ A.T + Q
+for r in range(n_rollouts):
+    y = data_dict["train_data"][r, :, :]
+    u = data_dict["train_u"][r, :]
+    for t in range(n_timepoints - 1):
+        if observations_present:
+            obs = normalise(y[t, :], min_ob, max_ob)
+            m[r, :, t], P[r, :, :, t] = filter_observation(all_models[0]['model'], all_results[0][1], m[r, :, t], P[r, :, :, t], obs, delta_mu)
+        if run_params["inference_method"] != "rpm":
+            y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
+        action = normalise(u[r, t][None], min_u, max_u)
+        m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, action, Q)
 plt.figure()
 plt.plot(y, 'r')
-plt.plot(y_recon, 'b--')
+plt.plot(m[0, :, :].T, 'g--')
+if run_params["inference_method"] != "rpm":
+    plt.plot(y_recon, 'b--')
 plt.show(block = False)
+
+breakpoint()
+
+import gym
+from jax import numpy as np
+from jax.lax import scan
+
+env = gym.make('Pendulum-v0')
+
+x_goal
+
+def get_previous_P(carry, inputs):
+
+    P, A, B, Q, R = carry
+
+    prev_P = Q + A.T @ P @ A - (A.T @ P @ B) @ np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+
+    carry = prev_P, A, B, Q, R
+    outputs = None
+
+    return carry, outputs
+
+def get_optimal_feedback_gain(A, B, Q, R):
+
+    carry = Q, A, B, Q, R
+    (P, _, _, _, _), _ = scan(get_previous_P, carry, None, length=100)
+    K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+
+    return K
+
+latent_dims = 3 ######## TO CHANGE
+u_dims = 1 ######## TO CHANGE
+Q_lqr = np.eye(latent_dims) ######## TO CHANGE
+R_lqr = np.eye(u_dims) * 1e-3 ######## TO CHANGE
+K = get_optimal_feedback_gain(A, B, Q_lqr, R_lqr)
+
+import numpy as np
+
+n_rollouts = 1
+m = np.zeros((n_rollouts, z_dim, n_timepoints))
+P = np.zeros((n_rollouts, z_dim, z_dim, n_timepoints))
+u = np.zeros((n_rollouts, n_timepoints, 1))
+m[:, :, 0] = m1[None].repeat(n_rollouts, axis = 0)
+P[:, :, :, 0] = Q1[None].repeat(n_rollouts, axis = 0)
+if run_params["inference_method"] != "rpm":
+    y_recon = np.zeros((n_rollouts, n_timepoints, y_dim))
+observations_present = True
+for r in range(n_rollouts):
+    obs = env.reset()
+    for t in range(n_timepoints - 1):
+        if observations_present:
+            obs = normalise(obs, min_ob, max_ob)
+            m[r, :, t], P[r, :, :, t] = filter_observation(all_models[0]['model'], all_results[0][1], m[r, :, t], P[r, :, :, t], obs, delta_mu)
+        u[r, t] = get_control(m[r, :, t], K)
+        if run_params["inference_method"] != "rpm":
+            y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
+        m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, u[r, t], Q)
+        action = unnormalise(u[r, t], min_u, max_u)
+        obs, reward, done, info = env.step(action)
+        env.render("human")
+# plt.figure()
+# plt.plot(y, 'r')
+# plt.plot(m[0, :, :].T, 'g--')
+# if run_params["inference_method"] != "rpm":
+#     plt.plot(y_recon, 'b--')
+# plt.show(block = False)
 
 breakpoint()
