@@ -11,7 +11,7 @@ key_0 = jr.PRNGKey(0)
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
 
-from svae.utils import construct_dynamics_matrix, inv_softplus, lie_params_to_constrained, scale_matrix_by_norm
+from svae.utils import construct_dynamics_matrix, inv_softplus, lie_params_to_constrained, scale_matrix_by_norm, construct_covariance_matrix
 from svae.distributions import LinearGaussianChain
 from svae.utils import dynamics_to_tridiag
 
@@ -196,15 +196,19 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
         super().__init__(latent_dims, seq_len)
         self.init_dynamics_noise_scale = init_dynamics_noise_scale
         self.input_dims = input_dims
+        self.seq_len = seq_len
 
     def init(self, key):
         D, U = self.latent_dims, self.input_dims
-        key_A_u, key_A_v, key_A_s, key_B= jr.split(key, 4)
+        key_A_u, key_A_v, key_A_s, key_B, key_J_aux, key_h_aux = jr.split(key, 6)
         # Equivalent to the unit matrix
-        eps = min(self.init_dynamics_noise_scale / 100, 1e-4)
-        Q_flat = np.concatenate([np.ones(D) 
-            * inv_softplus(self.init_dynamics_noise_scale, eps=eps), np.zeros((D*(D-1)//2))])
-        Q1_flat = np.concatenate([np.ones(D) * inv_softplus(1), np.zeros((D*(D-1)//2))])
+        # eps = min(self.init_dynamics_noise_scale / 100, 1e-4)
+        # Q_flat = np.concatenate([np.ones(D) 
+        #     * inv_softplus(self.init_dynamics_noise_scale, eps=eps), np.zeros((D*(D-1)//2))])
+        # Q1_flat = np.concatenate([np.ones(D) * inv_softplus(1), np.zeros((D*(D-1)//2))])
+        I = np.eye(D)
+        Q_flat = I[np.tril_indices(D)]
+        Q1_flat = I[np.tril_indices(D)]
         params = {
             "m1": np.zeros(D),
             # "Q1": np.zeros(D),
@@ -215,21 +219,27 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
             "B": jr.normal(key_B, (D, U)),
             # "Q": np.zeros(D),
             "Q": Q_flat,
-            "goal_norm": np.ones(1)
+            "goal_norm": np.ones(1),
+            # "J_aux": jr.normal(key_J_aux, (100, self.seq_len,  D * (D + 1) // 2)),
+            # "h_aux": jr.normal(key_h_aux, (100, self.seq_len, D)),
         }
         return params
 
     def get_dynamics_params(self, params):
         return {
             "m1": params["m1"],
-            "Q1": lie_params_to_constrained(params["Q1"], self.latent_dims),
+            # "Q1": lie_params_to_constrained(params["Q1"], self.latent_dims),
+            "Q1": construct_covariance_matrix(params["Q1"], self.latent_dims),
             # "Q1": np.diag(np.exp(params["Q1"])),
             "A": construct_dynamics_matrix(params["A_u"], params["A_v"], params["A_s"], self.latent_dims),
             "B": scale_matrix_by_norm(params["B"]),
             # "B":params["B"],
-            "Q": lie_params_to_constrained(params["Q"], self.latent_dims),  
+            # "Q": lie_params_to_constrained(params["Q"], self.latent_dims),
+            "Q": construct_covariance_matrix(params["Q"], self.latent_dims),  
             # "Q":  np.diag(np.exp(params["Q"]))
             "goal_norm": params["goal_norm"],
+            # "J_aux": vmap(vmap(lambda J, d: construct_covariance_matrix(J, d), in_axes=(0,None)), in_axes=(0,None))(params["J_aux"], self.latent_dims),
+            # "h_aux": params["h_aux"],
         }
 
     def get_constrained_params(self, params, u):

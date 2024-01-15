@@ -14,6 +14,8 @@ from flax.training import train_state
 from orbax.checkpoint import AsyncCheckpointer, Checkpointer, PyTreeCheckpointHandler, CheckpointManager, CheckpointManagerOptions
 from flax.training.early_stopping import EarlyStopping
 
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, MaxAbsScaler, RobustScaler
+
 def plot_img_grid(recon):
     plt.figure(figsize=(8,8))
     # Show the sequence as a block of images
@@ -81,26 +83,25 @@ def truncate_singular_values(A):
     u, s, vt = svd(A)
     return u @ np.diag(np.clip(s, eps, 1)) @ vt
 
-# def random_rotation(seed, n, theta=None):
-#     key1, key2 = jr.split(seed)
+def random_rotation(seed, n, theta=None):
+    key1, key2 = jr.split(seed)
 
-#     if theta is None:
-#         # Sample a random, slow rotation
-#         theta = 0.5 * np.pi * jr.uniform(key1)
+    if theta is None:
+        # Sample a random, slow rotation
+        theta = 0.5 * np.pi * jr.uniform(key1)
 
-#     if n == 1:
-#         return jr.uniform(key1) * np.eye(1)
+    if n == 1:
+        return jr.uniform(key1) * np.eye(1)
 
-#     rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
-#     out = np.eye(n)
-#     out = out.at[:2, :2].set(rot)
-#     q = np.linalg.qr(jr.uniform(key2, shape=(n, n)))[0]
-#     return q.dot(out).dot(q.T)
+    rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    out = np.eye(n)
+    out = out.at[:2, :2].set(rot)
+    q = np.linalg.qr(jr.uniform(key2, shape=(n, n)))[0]
+    return q.dot(out).dot(q.T)
 
 def scale_matrix_by_norm(M):
 
     # M /= np.linalg.norm(M)
-    M
 
     return M
 
@@ -115,7 +116,7 @@ def scale_matrix_by_norm(M):
 
 #     return scale_matrix_by_norm(A)
 
-def construct_dynamics_matrix(u, v, s, dim, eps = 1e-4):
+def construct_dynamics_matrix(u, v, s, dim, eps = 1e-6):
 
     U, _ = np.linalg.qr(u.reshape((dim, dim)))
     V, _ = np.linalg.qr(v.reshape((dim, dim)))
@@ -161,7 +162,16 @@ def dynamics_to_tridiag(dynamics_params, T, D):
     # h = h.at[1:].add(np.linalg.solve(Q, b))
     # return { "J": J, "L": L, "h": h }
 
-def get_train_state(model, all_optimisers, all_params, train_params):
+def get_scaler(scaler):
+    scalers = {
+        "minmax": MinMaxScaler,
+        "standard": StandardScaler,
+        "maxabs": MaxAbsScaler,
+        "robust": RobustScaler,
+    }
+    return scalers.get(scaler.lower())()
+
+def get_train_state(train_params, all_optimisers=[], all_params=[]):
 
     # orbax tutorial 
     # https://colab.research.google.com/github/google/orbax/blob/main/checkpoint/orbax/checkpoint/orbax_checkpoint.ipynb#scrollTo=G4Gv7L4olc_n
@@ -191,11 +201,6 @@ def get_train_state(model, all_optimisers, all_params, train_params):
                                   'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
                                  options)
 
-    states = []
-    for params, optimiser in zip(all_params, all_optimisers):
-
-        states.append(train_state.TrainState.create(apply_fn = lambda x: x, params = params, tx = optimiser)) # apply_fn unused (normally would be model.apply)
-
     if train_params['reload_state']:
 
         # restore the best checkpoint from train_params["reload_dir"]
@@ -210,5 +215,12 @@ def get_train_state(model, all_optimisers, all_params, train_params):
         # change ckpt_metrics_dir to train_params["save_dir"]
         from etils import epath
         mngr._directory = epath.Path(train_params["save_dir"] + '/checkpoints/')
+
+    else:
+
+        states = []
+        for params, optimiser in zip(all_params, all_optimisers):
+
+            states.append(train_state.TrainState.create(apply_fn = lambda x: x, params = params, tx = optimiser)) # apply_fn unused (normally would be model.apply)
 
     return states, mngr

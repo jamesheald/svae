@@ -8,7 +8,6 @@ import wandb
 import jax
 import jax.numpy as np
 import jax.random as jr
-key_0 = jr.PRNGKey(0) # Convenience
 # optax
 import optax as opt
 
@@ -323,24 +322,35 @@ def get_beta_schedule(params):
 
 def expand_lds_parameters(params):
     num_timesteps = params.get("num_timesteps") or 200
-    train_trials = { "small": 10, "medium": 100, "large": 1000 }
+    # train_trials = { "small": 10, "medium": 100, "large": 1000 }
     batch_sizes = {"small": 10, "medium": 10, "large": 10 }
     emission_noises = { "small": 10., "medium": 1., "large": .1 }
     dynamics_noises = { "small": 0.01, "medium": .1, "large": .1 }
-    latent_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
-    emission_dims = { "small": 5, "medium": 10, "large": 20, "32": 64, "64": 128}
-    input_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
+    # latent_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
+    # emission_dims = { "small": 5, "medium": 10, "large": 20, "32": 64, "64": 128}
+    # input_dims = { "small": 3, "medium": 5, "large": 10, "32": 32, "64": 64}
+    latent_dims = params.get("latent_dims")
+    emission_dims = params.get("emission_dims")
+    input_dims = params.get("input_dims")
+    params["rnn_dims"] = 10
     max_iters = 20000
 
     # Modify all the architectures according to the parameters given
     # D, H, N = params["latent_dims"], params["rnn_dims"], params["emission_dims"]
-    D, H, N, C = latent_dims[params["dimensionality"]], params["rnn_dims"], emission_dims[params["dimensionality"]], input_dims[params["dimensionality"]]
+    # D, H, N, C = latent_dims[params["dimensionality"]], params["rnn_dims"], emission_dims[params["dimensionality"]], input_dims[params["dimensionality"]]
+    D, H, N, C = latent_dims, params["rnn_dims"], emission_dims, input_dims
     inf_params = {}
-    if (params["inference_method"] == "svae"):
-        inf_params["recnet_class"] = "GaussianRecognition"
-        architecture = deepcopy(linear_recnet_architecture)
+    if (params["inference_method"] == "svae") or (params["inference_method"] == "rpm"):
+        if (params["inference_method"] == "svae"):
+            inf_params["recnet_class"] = "GaussianRecognition"
+        elif (params["inference_method"] == "rpm"):
+            inf_params["recnet_class"] = "RPM"
+        architecture = deepcopy(MLP_recnet_architecture)
         architecture["output_dim"] = D
-        architecture["diagonal_covariance"] = True if params.get("diagonal_covariance") else False
+        architecture["trunk_params"] = { "features": deepcopy(params.get("rec_trunk_features")) }
+        architecture["head_mean_params"] = { "features": deepcopy(params.get("rec_head_mean_features")) }
+        architecture["head_var_params"] = { "features": deepcopy(params.get("rec_head_var_features")) }
+        architecture["diagonal_covariance"] = True if params.get("rec_diagonal_covariance") else False
     elif (params["inference_method"] in ["dkf", "cdkf"]):
         inf_params["recnet_class"] = "GaussianBiRNN"
         architectures = {
@@ -400,8 +410,9 @@ def expand_lds_parameters(params):
         # We're just doing model learning since we're lazy
         "run_type": "model_learning",
         "dataset_params": {
-            "seed": key_0,
-            "num_trials": train_trials[params["dataset_size"]],
+            "seed": params.get("seed"),
+            # "num_trials": train_trials[params["dataset_size"]],
+            "num_trials": params.get("num_trials"),
             "num_timesteps": num_timesteps,
             "emission_cov": emission_noises[params["snr"]],
             "dynamics_cov": dynamics_noises[params["snr"]],
@@ -410,7 +421,7 @@ def expand_lds_parameters(params):
             "input_dims": C,
         },
         # Implementation choice
-        "use_parallel_kf": False,
+        "use_parallel_kf": params.get("use_parallel_kf"),
         # Training specifics
         "max_iters": max_iters,
         "elbo_samples": 1,
@@ -513,7 +524,7 @@ def expand_pendulum_control_parameters(params):
         # We're just doing model learning since we're lazy
         "run_type": "model_learning",
         "dataset_params": {
-            "seed": key_0,
+            "seed": params.get("seed"),
             # "num_trials": train_trials[params["dataset_size"]],
             "num_timesteps": num_timesteps,
             # "emission_cov": emission_noises[params["snr"]],
@@ -624,7 +635,7 @@ def expand_pendulum_parameters(params):
         "decnet_class": decnet_class,
         "decnet_architecture": decnet_architecture,
         "dataset_params": {
-            "seed": key_0,
+            "seed": params.get("seed"),
             "train_trials": train_trials[params["dataset_size"]],
             "val_trials": val_trials[params["dataset_size"]],
             "emission_cov": noise_scales[params["snr"]]

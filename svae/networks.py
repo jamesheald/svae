@@ -47,6 +47,22 @@ class MLP(nn.Module):
             bias_init=self.bias_init)(x)
         return x
 
+class trunk_MLP(nn.Module):
+    """
+    Define a simple fully connected MLP with ReLU activations.
+    """
+    features: Sequence[int]
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = nn.initializers.he_normal()
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = nn.initializers.zeros
+
+    @nn.compact
+    def __call__(self, x):
+        for feat in self.features:
+            x = nn.relu(nn.Dense(feat, 
+                kernel_init=self.kernel_init,
+                bias_init=self.bias_init,)(x))
+        return x
+
 class Identity(nn.Module):
     """
     A layer which passes the input through unchanged.
@@ -169,7 +185,7 @@ class RPM(RPMPotentialNetwork):
 
     @classmethod
     def from_params(cls, input_rank=1, input_dim=None, output_dim=None, 
-                    trunk_type="Identity", trunk_params=None, 
+                    trunk_type="trunk_MLP", trunk_params=None, 
                     head_mean_type="MLP", head_mean_params=None,
                     head_var_type="MLP", head_var_params=None, diagonal_covariance=False,
                     cov_init=1, eps=1e-4): 

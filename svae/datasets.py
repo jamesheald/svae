@@ -7,7 +7,7 @@ from flax.core import frozen_dict as fd
 
 import tensorflow_probability.substrates.jax.distributions as tfd
 
-# from svae.utils import random_rotation
+from svae.utils import random_rotation, get_scaler
 from svae.priors import LinearGaussianChainPrior
 from svae.posteriors import LDSSVAEPosterior
 
@@ -55,17 +55,16 @@ class LDS(LinearGaussianChainPrior):
         Sigma = solve(J, np.eye(self.latent_dims)[None])
         mu = vmap(solve)(J, h)
 
-        return self.posterior.infer(self.base.get_constrained_params(params, u), {"J": J, "h": h, 
-                                                                    "mu": mu, "Sigma": Sigma}, u)
+        return self.posterior.infer(self.base.get_constrained_params(params, u), {"mu": mu, "Sigma": Sigma}, u)
         
     # Also assumes single data points
     def marginal_log_likelihood(self, params, u, data):
         posterior = self.posterior.distribution(self.e_step(params, u, data))
         states = posterior.mean
-        prior_ll = self.log_prob(params, u, states, data)
-        posterior_ll = posterior.log_prob(states)
+        joint_ll = self.log_prob(params, u, states, data)
+        posterior_ll = posterior.log_prob(states, u=u)
         # This is numerically unstable!
-        lps = prior_ll - posterior_ll
+        lps = joint_ll - posterior_ll # log p(x, y) - log p(x|y) = log p(x) + log p(y|x) - log p(x|y) = log p(y)
         return lps
 
 def sample_lds_dataset(run_params):    
@@ -103,6 +102,8 @@ def sample_lds_dataset(run_params):
     params = {
             "m1": jr.normal(key=seed_m1, shape=(latent_dims,)),
             "Q1": Q,
+            # "m1": np.ones((latent_dims,)),
+            # "Q1": 0.01 * np.eye(latent_dims),
             "Q": Q,
             "A": random_rotation(seed_A, latent_dims, theta=np.pi/20),
             "B": B,
@@ -111,7 +112,10 @@ def sample_lds_dataset(run_params):
             "d": d,
         }
 
-    u = jr.normal(seed_u, shape=(num_trials, num_timesteps - 1, input_dims))
+    # sinusoidal controls with random phase
+    u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
+    u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
+    u = u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
 
     # constrained = lds.get_constrained_params
 
@@ -126,58 +130,63 @@ def sample_lds_dataset(run_params):
     print("Data MLL: ", mll)
     
     seed_val, seed_u = jr.split(seed_sample)
-    val_u = jr.normal(seed_u, shape=(num_trials, num_timesteps - 1, input_dims))
+
+    # sinusoidal controls with random phase
+    u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
+    val_u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
+    val_u = val_u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
+
     # val_states, val_data = lds.sample(params, val_u,
     #                           shape=(num_trials,), 
     #                           key=seed_val)
     val_states, val_data = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(val_u, jr.split(seed_val, num_trials))
 
+    scaler_obs = get_scaler('standard')
+    scaler_u = get_scaler('standard')
+    # data = np.concatenate((data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2) # concatenate time to data
+    # val_data = np.concatenate((val_data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2) # concatenate time to data
+    scaled_obs = scaler_obs.fit_transform(np.vstack((data.reshape(-1, data.shape[-1]), val_data.reshape(-1, val_data.shape[-1]))))
+    scaled_u = scaler_u.fit_transform(np.vstack((u.reshape(-1, u.shape[-1]), val_u.reshape(-1, val_u.shape[-1]))))
+
     data_dict["generative_model"] = lds
     data_dict["marginal_log_likelihood"] = mll
-    data_dict["train_data"] = data
-    data_dict["train_u"] = u
+    data_dict["train_data"] = scaled_obs[:data[:,:,0].size].reshape(num_trials, num_timesteps, -1)
+    data_dict["train_u"] = scaled_u[:u[:,:,0].size].reshape(num_trials, num_timesteps, -1)
     data_dict["train_states"] = states
-    data_dict["val_data"] = val_data
-    data_dict["val_u"] = val_u
+    data_dict["val_data"] = scaled_obs[data[:,:,0].size:].reshape(num_trials, num_timesteps, -1)
+    data_dict["val_u"] = scaled_u[u[:,:,0].size:].reshape(num_trials, num_timesteps, -1)
     data_dict["val_states"] = val_states
     data_dict["dataset_params"] = fd.freeze(run_params["dataset_params"])
     data_dict["lds_params"] = params
+    
+    data_dict["scaled_goal"] = np.array([1., 0., 0.]) # to stop an error being thrown as code expects this
+    data_dict['scaler_obs'] = scaler_obs
+    data_dict['scaler_u'] = scaler_u
 
     return data_dict
-
-def normalise(t, t_min, t_max):
-
-    return (t - t_min) / (t_max - t_min) - 0.5
-
-def unnormalise(t, t_min, t_max):
-
-    return t_min + t * (t_max - t_min) - 0.5
 
 def load_pendulum_control_data(run_params):
 
     import pickle
     obj = pickle.load(open("pendulum_data.pkl", 'rb'))
 
-    sigma = 0
-    train_size = run_params['train_size']
-    val_size = run_params['val_size']
+    scaler_obs = get_scaler('standard')
+    scaler_u = get_scaler('standard')
+    obj['u'] = obj['u'][:, :, None]
+    assert obj['observations'].ndim == obj['u'].ndim == 3
+    obs = scaler_obs.fit_transform(obj['observations'].reshape(-1, obj['observations'].shape[-1])).reshape(obj['observations'].shape)
+    u = scaler_u.fit_transform(obj['u'].reshape(-1, obj['u'].shape[-1])).reshape(obj['u'].shape).squeeze()
 
     data_dict = {}
-    data_dict["train_data"] = np.array(obj['observations'][:train_size, :, :])
-    data_dict["train_data"] += jr.normal(jr.PRNGKey(0), data_dict["train_data"].shape) * sigma
-    data_dict["train_u"] = np.array(obj['u'][:train_size, :, None])
-    data_dict["train_u"] += jr.normal(jr.PRNGKey(1), data_dict["train_u"].shape) * sigma
-    data_dict["val_data"] =  np.array(obj['observations'][-val_size:, :, :])
-    data_dict["val_data"] += jr.normal(jr.PRNGKey(2), data_dict["val_data"].shape) * sigma
-    data_dict["val_u"] = np.array(obj['u'][-val_size:, :, None])
-    data_dict["val_u"] += jr.normal(jr.PRNGKey(3), data_dict["val_u"].shape) * sigma
+    data_dict["train_data"] = np.array(obs[:run_params['train_size'], :, :])
+    data_dict["train_u"] = np.array(u[:run_params['train_size'], :, None])
+    data_dict["val_data"] =  np.array(obs[-run_params['val_size']:, :, :])
+    data_dict["val_u"] = np.array(u[-run_params['val_size']:, :, None])
+    data_dict["scaled_goal"] = scaler_obs.transform(np.array([1., 0., 0.])[None]).squeeze() # obs are [cos(theta), sin(theta), theta_dot], where theta = 0 is upright (the goal)
+    data_dict['scaler_obs'] = scaler_obs
+    data_dict['scaler_u'] = scaler_u
 
-    data_dict["train_data"] = normalise(data_dict["train_data"], np.min(obj['observations'], axis = (0, 1)), np.max(obj['observations'], axis = (0, 1)))
-    data_dict["train_u"] = normalise(data_dict["train_u"], np.min(obj['u'], axis = (0, 1)), np.max(obj['u'], axis = (0, 1)))
-    data_dict["val_data"] = normalise(data_dict["val_data"], np.min(obj['observations'], axis = (0, 1)), np.max(obj['observations'], axis = (0, 1)))
-    data_dict["val_u"] = normalise(data_dict["val_u"], np.min(obj['u'], axis = (0, 1)), np.max(obj['u'], axis = (0, 1)))
-
-    return data_dict 
+    return data_dict
 
 def load_pendulum(run_params, log=False):    
     d = run_params["dataset_params"]

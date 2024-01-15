@@ -204,7 +204,8 @@ class LinearGaussianSSM(tfd.Distribution):
             dtype=dtype,
             validate_args=validate_args,
             allow_nan_stats=allow_nan_stats,
-            reparameterization_type=reparameterization.FULLY_REPARAMETERIZED,
+            # reparameterization_type=reparameterization.FULLY_REPARAMETERIZED,
+            reparameterization_type=reparameterization.NOT_REPARAMETERIZED,
             parameters=dict(initial_mean=self._initial_mean,
                             initial_covariance=self._initial_covariance,
                             dynamics_matrix=self._dynamics_matrix,
@@ -252,11 +253,11 @@ class LinearGaussianSSM(tfd.Distribution):
                                    dynamics_input_weights=p["B"], emissions_bias=d)
         smoothed = lgssm_smoother(params, mus, u)._asdict()
 
-        log_Z = lgssm_log_normalizer(dynamics_params,
-                                     smoothed["filtered_means"],
-                                     smoothed["filtered_covariances"],
-                                     emissions_potentials,
-                                     u)
+        # log_Z = lgssm_log_normalizer(dynamics_params,
+        #                              smoothed["filtered_means"],
+        #                              smoothed["filtered_covariances"],
+        #                              emissions_potentials,
+        #                              u)
 
         return cls(dynamics_params["m1"],
                    dynamics_params["Q1"],
@@ -265,7 +266,7 @@ class LinearGaussianSSM(tfd.Distribution):
                    dynamics_params["Q"],
                    emissions_potentials["mu"],
                    emissions_potentials["Sigma"],
-                   log_Z,
+                   smoothed["marginal_loglik"],
                    smoothed["filtered_means"],
                    smoothed["filtered_covariances"],
                    smoothed["smoothed_means"],
@@ -314,7 +315,7 @@ class LinearGaussianSSM(tfd.Distribution):
     def covariance(self):
         return self.smoothed_covariances
 
-    
+    # TODO: currently this function does not depend on the dynamics bias
     def _log_prob(self, data, u, **kwargs):
         A = self._dynamics_matrix  # params["A"]
         B = self._input_matrix  # params["B"]
@@ -324,16 +325,17 @@ class LinearGaussianSSM(tfd.Distribution):
 
         num_batch_dims = len(data.shape) - 2
 
-        # here log_prob under the full joint across all time is calculated by exploiting the Markov structure
         ll = np.sum(
             MVN(loc=np.einsum("ij,...tj->...ti", A, data[..., :-1, :]) + np.einsum("ij,...tj->...ti", B, u[..., :-1, :]),
                 covariance_matrix=Q).log_prob(data[..., 1:, :])
         )
         ll += MVN(loc=m1, covariance_matrix=Q1).log_prob(data[..., 0, :])
 
+        # Add the observation potentials
+        # ll += - 0.5 * np.einsum("...ti,tij,...tj->...", data, self._emissions_precisions, data) \
+        #       + np.einsum("...ti,ti->...", data, self._emissions_linear_potentials)
         ll += np.sum(MVN(loc=self._emissions_means,
                          covariance_matrix=self._emissions_covariances).log_prob(data), axis=-1)
-
         # Add the log normalizer
         ll -= self._log_normalizer
 
@@ -431,7 +433,6 @@ class ParallelLinearGaussianSSM(LinearGaussianSSM):
         # Compute ExxT
         A, Q = dynamics_params["A"], dynamics_params["Q"]
         filtered_cov = smoothed["filtered_covariances"]
-        filtered_mean = smoothed["smoothed_means"]
         smoothed_cov = smoothed["smoothed_covariances"]
         smoothed_mean = smoothed["smoothed_means"]
         G = vmap(lambda C: psd_solve(Q + A @ C @ A.T, A @ C).T)(filtered_cov)
