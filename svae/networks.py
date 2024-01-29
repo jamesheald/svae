@@ -21,12 +21,104 @@ from typing import (Any, Callable, Sequence, Iterable)
 
 import numpy as onp
 
-from svae.utils import lie_params_to_constrained, construct_covariance_matrix
+from svae.utils import lie_params_to_constrained, construct_covariance_matrix, construct_precision_matrix
+
+from flax.linen.initializers import lecun_normal, zeros_init # https://flax.readthedocs.io/en/latest/api_reference/flax.linen/initializers.html
+
 
 PRNGKey = Any
 Shape = Iterable[int]
 Dtype = Any
 Array = Any
+
+# x = jnp.ones((2, 3))
+# variables = layer.init(jax.random.key(0), x)
+# out = layer.apply(variables, x)
+
+class linear_rpm(nn.Module):
+    z_dim: int
+
+    def setup(self):
+
+        self.s = self.param('sigma_params', lecun_normal(), (self.z_dim * (self.z_dim + 1) // 2, 1))
+        self.dense = nn.Dense(self.z_dim)
+
+    def __call__(self, x):
+
+        def get_natural_parameters(Sigma, J, x):
+
+            mu = self.dense(x)
+            h = J @ mu
+
+            return Sigma, J, mu, h
+
+        Sigma = construct_covariance_matrix(self.s[:, 0], self.z_dim)
+        J = psd_solve(Sigma, np.eye(self.z_dim))
+
+        if x.ndim == 1:
+            Sigma, J, mu, h = get_natural_parameters(Sigma, J, x)
+        elif x.ndim == 2:
+            Sigma, J, mu, h = vmap(get_natural_parameters, in_axes=(None,None,0))(Sigma, J, x)
+        elif x.ndim == 3:
+            Sigma, J, mu, h = vmap(vmap(get_natural_parameters, in_axes=(None,None,0)), in_axes=(None,None,0))(Sigma, J, x)
+
+        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
+
+class nonparametric_natural_parameters(nn.Module):
+    batch_size: int
+    n_timesteps: int
+    z_dim: int
+
+    def setup(self):
+
+        self.s = self.param('sigma_params', lecun_normal(), (self.batch_size, self.n_timesteps, self.z_dim * (self.z_dim + 1) // 2,))
+        self.mu = self.param('mu_params', zeros_init(), (self.batch_size, self.n_timesteps, self.z_dim,))
+
+    def __call__(self):
+
+        def get_natural_parameters(s, mu):
+
+            Sigma = construct_covariance_matrix(s, self.z_dim)
+
+            J = psd_solve(Sigma, np.eye(self.z_dim))
+            h = J @ mu
+
+            return Sigma, mu, J, h
+
+        Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(self.s, self.mu)
+
+        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
+
+class delta_q(nn.Module):
+    carry_dim: int
+    z_dim: int
+
+    def setup(self):
+        
+        self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
+
+        self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+
+    def __call__(self, inputs):
+
+        def get_natural_parameters(x):
+
+            mu, var_output_flat = np.split(x, [self.z_dim])
+
+            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+
+            J = psd_solve(Sigma, np.eye(self.z_dim))
+            h = J @ mu
+
+            return Sigma, mu, J, h
+
+        concatenated_carry = self.BiGRU(inputs)
+
+        out = self.dense(concatenated_carry)
+
+        Sigma, mu, J, h = vmap(get_natural_parameters)(out)
+
+        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
 
 class MLP(nn.Module):
     """
@@ -58,9 +150,14 @@ class trunk_MLP(nn.Module):
     @nn.compact
     def __call__(self, x):
         for feat in self.features:
-            x = nn.relu(nn.Dense(feat, 
+            # x = nn.relu(nn.Dense(feat, 
+            #     kernel_init=self.kernel_init,
+            #     bias_init=self.bias_init,)(x))
+            x = nn.Dense(feat, 
                 kernel_init=self.kernel_init,
-                bias_init=self.bias_init,)(x))
+                bias_init=self.bias_init,)(x)
+            x = nn.LayerNorm()(x)
+            x = nn.relu(x)
         return x
 
 class Identity(nn.Module):
@@ -223,6 +320,61 @@ class RPM(RPMPotentialNetwork):
             # Sigma = lie_params_to_constrained(var_output_flat, self.latent_dims, self.eps)
         J = psd_solve(Sigma, np.eye(self.latent_dims))
         h = J @ mu
+        # J = np.linalg.inv(Sigma)
+        # lower diagonal blocks of precision matrix
+        # return (Sigma, mu)
+        return Sigma, mu, J, h
+
+class F_Tilde(RPMPotentialNetwork):
+
+    use_diag : int = None
+    input_rank : int = None
+    latent_dims : int = None
+    trunk_fn : nn.Module = None
+    head_mean_fn : nn.Module = None
+    head_log_var_fn : nn.Module = None
+    eps : float = None
+
+    @classmethod
+    def from_params(cls, input_rank=1, input_dim=None, output_dim=None, 
+                    trunk_type="trunk_MLP", trunk_params=None, 
+                    head_mean_type="MLP", head_mean_params=None,
+                    head_var_type="MLP", head_var_params=None, diagonal_covariance=False,
+                    cov_init=1, eps=1e-4): 
+
+        if trunk_type == "Identity":
+            trunk_params = { "features": input_dim}
+        if head_mean_type == "MLP":
+            head_mean_params["features"] += [output_dim]
+        if head_var_type == "MLP":
+            if (diagonal_covariance):
+                head_var_params["features"] += [output_dim]
+            else:
+                head_var_params["features"] += [output_dim * (output_dim + 1) // 2]
+            head_var_params["kernel_init"] = nn.initializers.zeros
+            head_var_params["bias_init"] = nn.initializers.constant(cov_init)
+
+        trunk_fn = globals()[trunk_type](**trunk_params)
+        head_mean_fn = globals()[head_mean_type](**head_mean_params)
+        head_log_var_fn = globals()[head_var_type](**head_var_params)
+
+        return cls(diagonal_covariance, input_rank, output_dim, trunk_fn, 
+                   head_mean_fn, head_log_var_fn, eps)
+
+    def _call_single(self, inputs):
+        # Apply the trunk.
+        trunk_output = self.trunk_fn(inputs)
+        # Get the mean.
+        h = self.head_mean_fn(trunk_output)
+        # Get the covariance parameters and build a full matrix from it.
+        prec_output_flat = self.head_log_var_fn(trunk_output)
+        if self.use_diag:
+            J = np.diag(softplus(prec_output_flat) + self.eps)
+        else:
+            J = construct_precision_matrix(prec_output_flat, self.latent_dims)
+            # Sigma = lie_params_to_constrained(var_output_flat, self.latent_dims, self.eps)
+        Sigma = psd_solve(J, np.eye(self.latent_dims))
+        mu = Sigma @ h
         # J = np.linalg.inv(Sigma)
         # lower diagonal blocks of precision matrix
         # return (Sigma, mu)

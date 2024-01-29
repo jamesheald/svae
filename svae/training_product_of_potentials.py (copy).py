@@ -1,6 +1,6 @@
 import jax
 from jax import jit, vmap
-from jax.lax import scan
+from jax.lax import scan, dynamic_slice, dynamic_update_slice
 from jax import random as jr
 from jax import numpy as np
 from jax.tree_util import tree_map
@@ -708,14 +708,204 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, goal_
     # K = model.prior.get_optimal_feedback_gain(p["A"], p["B"], Q_lqr, R_lqr)
     # optimal_prior_params = model.prior.get_marginals_under_optimal_control(prior_params, x_goal, u_eq, K)
 
-    prior_params_batch = vmap(model.prior.get_constrained_params, in_axes=(None,0))(model_params["prior_params"], u_batch)
+    # def node_potential(mu, L):
+
+    #     # chapter 2.2.7.1 in Murphy, Probabilistic Machine Learning: Advanced Topics
+
+    #     K = L
+    #     h = L @ mu
+
+    #     return K, h
+
+    # def edge_potential(A, b, L):
+
+    #     # chapter 2.2.7.5 in Murphy, Probabilistic Machine Learning: Advanced Topics
+    #     # potential over (x_{t - 1}, x_t) or (x_t, y_t), in that order
+
+    #     K = np.block([[A.T @ L @ A, - A.T @ L], [- L @ A, L]])
+    #     h = np.concatenate((- A.T @ L @ b, L @ b))
+
+    #     return K, h
+
+    def dynamic_slice_add(x, start_indices, slice_sizes, y):
+
+        x_new = dynamic_slice(x, start_indices, slice_sizes) + y
+        x_updated = dynamic_update_slice(x, x_new, start_indices)
+
+        return x_updated
+
+    def update_prior_one_step(carry, inputs):
+
+        current_prior_params, J_prior, h_prior, J_likelihood, h_likelihood = carry
+        u, t, RPM_J, RPM_h = inputs
+
+        # edge (transition) potential
+        A = current_prior_params['A']
+        b = current_prior_params['B'] @ u
+        x_dim = b.size
+        L = psd_solve(current_prior_params['Q'], np.eye(x_dim))
+        JT = np.block([[A.T @ L @ A, - A.T @ L], [- L @ A, L]])
+        hT = np.concatenate((- A.T @ L @ b, L @ b))
+        # J_prior = J_prior.at[x_dim * (t - 1) : x_dim * (t + 1), x_dim * (t - 1) : x_dim * (t + 1)].add(JT)
+        # h_prior = h_prior.at[x_dim * (t - 1) : x_dim * (t + 1)].add(hT)
+        J_prior = dynamic_slice_add(J_prior, (x_dim * (t - 1), x_dim * (t - 1)), (x_dim * 2, x_dim * 2), JT)
+        h_prior = dynamic_slice_add(h_prior, (x_dim * (t - 1),), (x_dim * 2,), hT)
+
+        # evidence potential
+        # J_likelihood = J_likelihood.at[x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)].add(RPM_J)
+        # h_likelihood = h_likelihood.at[x_dim * t : x_dim * (t + 1)].add(RPM_h)
+        J_likelihood = dynamic_slice_add(J_likelihood, (x_dim * t, x_dim * t), (x_dim, x_dim), RPM_J)
+        h_likelihood = dynamic_slice_add(h_likelihood, (x_dim * t,), (x_dim,), RPM_h)
+
+        carry = current_prior_params, J_prior, h_prior, J_likelihood, h_likelihood
+        outputs = None
+
+        return carry, outputs
+
+    def update_prior(x_dim, n_timepoints, current_prior_params, u, RPM_J, RPM_h):
+
+        J_prior = np.zeros((x_dim * n_timepoints, x_dim * n_timepoints))
+        h_prior = np.zeros((x_dim * n_timepoints))
+        J_likelihood = np.zeros((x_dim * n_timepoints, x_dim * n_timepoints))
+        h_likelihood = np.zeros((x_dim * n_timepoints))
+
+        # node (prior) potential
+        K0 = psd_solve(current_prior_params['Q1'], np.eye(x_dim))
+        h0 = K0 @ current_prior_params['m1']
+        J_prior = J_prior.at[:x_dim, :x_dim].set(K0)
+        h_prior = h_prior.at[:x_dim].set(h0)
+
+        J_likelihood = J_likelihood.at[:x_dim,:x_dim].add(RPM_J[0])
+        h_likelihood = h_likelihood.at[:x_dim].add(RPM_h[0])
+
+        carry = current_prior_params, J_prior, h_prior, J_likelihood, h_likelihood
+        inputs = u[:-1], np.arange(1, n_timepoints), RPM_J[1:], RPM_h[1:]
+        (_, J_prior, h_prior, J_likelihood, h_likelihood), _ = scan(update_prior_one_step, carry, inputs)
+
+        return J_prior, h_prior, J_likelihood, h_likelihood
+
+    def get_marginal_one_step(carry, inputs):
+
+        J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg, Sigma_prior, Sigma_posterior, mu_prior, mu_posterior = carry
+        t = inputs
+
+        # J_prior_marg = J_prior_marg.at[t,:,:].set(psd_solve(Sigma_prior[x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+        # J_posterior_marg = J_posterior_marg.at[t,:,:].set(psd_solve(Sigma_posterior[x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+        # h_prior_marg = h_prior_marg.at[t,:].set(J_prior_marg[t,:,:] @ mu_prior[x_dim * t : x_dim * (t + 1)])
+        # h_posterior_marg = h_posterior_marg.at[t,:].set(J_posterior_marg[t,:,:] @ mu_posterior[x_dim * t : x_dim * (t + 1)])
+        
+        x_dim = J_prior_marg.shape[-1]
+        J_prior_t = psd_solve(dynamic_slice(Sigma_prior, (x_dim * t, x_dim * t), (x_dim, x_dim)), np.eye(x_dim))
+        J_prior_marg = dynamic_update_slice(J_prior_marg, J_prior_t[None], (t,0,0))
+        J_posterior_t = psd_solve(dynamic_slice(Sigma_posterior, (x_dim * t, x_dim * t), (x_dim, x_dim)), np.eye(x_dim))
+        J_posterior_marg = dynamic_update_slice(J_posterior_marg, J_posterior_t[None], (t,0,0))
+        h_prior_t = J_prior_t @ dynamic_slice(mu_prior, (x_dim * t,), (x_dim,))
+        h_prior_marg = dynamic_update_slice(h_prior_marg, h_prior_t[None], (t,0))
+        h_posterior_t = J_posterior_t @ dynamic_slice(mu_posterior, (x_dim * t,), (x_dim,))
+        h_posterior_marg = dynamic_update_slice(h_posterior_marg, h_posterior_t[None], (t,0))
+
+        carry = J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg, Sigma_prior, Sigma_posterior, mu_prior, mu_posterior
+        outputs = None
+
+        return carry, outputs
+
+    def get_marginal(x_dim, n_timepoints, J_prior, h_prior, J_posterior, h_posterior):
+
+        Sigma_prior = psd_solve(J_prior, np.eye(J_prior.shape[-1]))
+        Sigma_posterior = psd_solve(J_posterior, np.eye(J_posterior.shape[-1]))
+        mu_prior = np.einsum("jk,k->j", Sigma_prior, h_prior)
+        mu_posterior = np.einsum("jk,k->j", Sigma_posterior, h_posterior)
+
+        J_prior_marg = np.zeros((n_timepoints, x_dim, x_dim))
+        J_posterior_marg = np.zeros((n_timepoints, x_dim, x_dim))
+        h_prior_marg = np.zeros((n_timepoints, x_dim))
+        h_posterior_marg = np.zeros((n_timepoints, x_dim))
+
+        carry = J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg, Sigma_prior, Sigma_posterior, mu_prior, mu_posterior
+        inputs = np.arange(n_timepoints)
+        (J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg, _, _, _, _), _ = scan(get_marginal_one_step, carry, inputs)
+
+        return J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg
+
+    x_dim = data_batch.shape[-1]
+    current_prior_params = model.prior.get_dynamics_params(model_params["prior_params"])
+    J_prior, h_prior, J_likelihood, h_likelihood = vmap(update_prior, in_axes=(None,None,None,0,0,0))(x_dim, n_timepoints, current_prior_params, u_batch, RPM_batch["J"], RPM_batch["h"])
+    J_posterior = J_prior + J_likelihood
+    h_posterior = h_prior + h_likelihood
+
+    J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg = vmap(get_marginal, in_axes=(None,None,0,0,0,0))(x_dim, n_timepoints, J_prior, h_prior, J_posterior, h_posterior)
+
+    # # compute Sigma and mu
+    # Sigma_prior = vmap(lambda J: psd_solve(J, np.eye(J.shape[-1])))(J_prior)
+    # Sigma_posterior = vmap(lambda J: psd_solve(J, np.eye(J.shape[-1])))(J_posterior)
+    # mu_prior = np.einsum("ijk,ik->ij", Sigma_prior, h_prior)
+    # mu_posterior = np.einsum("ijk,ik->ij", Sigma_posterior, h_posterior)
+    
+    # # get marginals
+    # J_prior_marg = np.zeros((batch_size, n_timepoints, x_dim, x_dim))
+    # J_posterior_marg = np.zeros((batch_size, n_timepoints, x_dim, x_dim))
+    # h_prior_marg = np.zeros((batch_size, n_timepoints, x_dim))
+    # h_posterior_marg = np.zeros((batch_size, n_timepoints, x_dim))
+    # for batch_id in range(batch_size):
+    #     for t in range(n_timepoints):
+    #         J_prior_marg = J_prior_marg.at[batch_id,t,:,:].set(psd_solve(Sigma_prior[batch_id, x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+    #         J_posterior_marg = J_posterior_marg.at[batch_id,t,:,:].set(psd_solve(Sigma_posterior[batch_id, x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+    #         h_prior_marg = h_prior_marg.at[batch_id,t,:].set(J_prior_marg[batch_id,t,:,:] @ mu_prior[batch_id, x_dim * t : x_dim * (t + 1)])
+    #         h_posterior_marg = h_posterior_marg.at[batch_id,t,:].set(J_posterior_marg[batch_id,t,:,:] @ mu_posterior[batch_id, x_dim * t : x_dim * (t + 1)])
+
+    # x_dim = data_batch.shape[-1]
+    # J_prior = np.zeros((batch_size, x_dim * n_timepoints, x_dim * n_timepoints))
+    # J_likelihood = np.zeros((batch_size, x_dim * n_timepoints, x_dim * n_timepoints))
+    # h_prior = np.zeros((batch_size, x_dim * n_timepoints))
+    # h_likelihood = np.zeros((batch_size, x_dim * n_timepoints))
+    # for batch_id in range(batch_size):
+    #     for t in range(n_timepoints):
+
+    #         if t == 0:
+
+    #             # prior
+    #             J0, h0 = node_potential(current_prior_params['m1'], psd_solve(current_prior_params['Q1'], np.eye(x_dim)))
+    #             J_prior = J_prior.at[batch_id, :x_dim, :x_dim].set(J0)
+    #             h_prior = h_prior.at[batch_id, :x_dim].set(h0)
+
+    #         else:
+
+    #             # transition
+    #             JT, hT = edge_potential(current_prior_params['A'], current_prior_params['B'] @ u_batch[batch_id,t - 1], psd_solve(current_prior_params['Q'], np.eye(x_dim)))
+    #             J_prior = J_prior.at[batch_id, x_dim * (t - 1) : x_dim * (t + 1), x_dim * (t - 1) : x_dim * (t + 1)].add(JT)
+    #             h_prior = h_prior.at[batch_id, x_dim * (t - 1) : x_dim * (t + 1)].add(hT)
+
+    #         # f/F factor
+    #         J_likelihood = J_likelihood.at[batch_id, x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)].add(RPM_batch["J"][batch_id,t,:])
+    #         h_likelihood = h_likelihood.at[batch_id, x_dim * t : x_dim * (t + 1)].add(RPM_batch["h"][batch_id,t,:])
+
+    # J_posterior = J_prior + J_likelihood
+    # h_posterior = h_prior + h_likelihood
+
+    # # compute Sigma and mu
+    # Sigma_prior = vmap(lambda J: psd_solve(J, np.eye(J.shape[-1])))(J_prior)
+    # Sigma_posterior = vmap(lambda J: psd_solve(J, np.eye(J.shape[-1])))(J_posterior)
+    # mu_prior = np.einsum("ijk,ik->ij", Sigma_prior, h_prior)
+    # mu_posterior = np.einsum("ijk,ik->ij", Sigma_posterior, h_posterior)
+    
+    # # get marginals
+    # J_prior_marg = np.zeros((batch_size, n_timepoints, x_dim, x_dim))
+    # J_posterior_marg = np.zeros((batch_size, n_timepoints, x_dim, x_dim))
+    # h_prior_marg = np.zeros((batch_size, n_timepoints, x_dim))
+    # h_posterior_marg = np.zeros((batch_size, n_timepoints, x_dim))
+    # for batch_id in range(batch_size):
+    #     for t in range(n_timepoints):
+    #         J_prior_marg = J_prior_marg.at[batch_id,t,:,:].set(psd_solve(Sigma_prior[batch_id, x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+    #         J_posterior_marg = J_posterior_marg.at[batch_id,t,:,:].set(psd_solve(Sigma_posterior[batch_id, x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)], np.eye(x_dim)))
+    #         h_prior_marg = h_prior_marg.at[batch_id,t,:].set(J_prior_marg[batch_id,t,:,:] @ mu_prior[batch_id, x_dim * t : x_dim * (t + 1)])
+    #         h_posterior_marg = h_posterior_marg.at[batch_id,t,:].set(J_posterior_marg[batch_id,t,:,:] @ mu_posterior[batch_id, x_dim * t : x_dim * (t + 1)])
 
     # if using nonparametric delta_f_tilde
     # delta_f_tilde = model.delta_nat_f_tilde.apply(model_params["delta_f_tilde_params"])
 
     result = vmap(partial(model.compute_objective, **train_params), 
-                  in_axes=(0, 0, 0, 0, 0, None, None, None))\
-                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, np.arange(batch_size), prior_params_batch, RPM_batch, model_params)
+                  in_axes=(0, 0, 0, 0, 0, None, None, None, None, None, None))\
+                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, np.arange(batch_size), (J_prior, h_prior), (J_posterior, h_posterior), (J_prior_marg, h_prior_marg), (J_posterior_marg, h_posterior_marg), RPM_batch, model_params)
     # Need to compute sufficient stats if we want the natural gradient update
     if (train_params.get("use_natural_grad")):
         post_params = result["posterior_params"]
@@ -781,7 +971,7 @@ def svae_update(params, grads, opts, opt_states, model, aux, **train_params):
     # params["rec_params"] = opt.apply_updates(params["rec_params"], updates)
     rec_opt_state = rec_opt_state.apply_gradients(grads = rec_grad)
     params["rec_params"] = rec_opt_state.params
-    params["post_params"] = aux["posterior_params"]
+    # params["post_params"] = aux["posterior_params"]
     # params["post_samples"] = aux["posterior_samples"]
     if train_params["run_type"] == "model_learning":
         if train_params["inference_method"] != "rpm" and train_params["inference_method"] != "lds":

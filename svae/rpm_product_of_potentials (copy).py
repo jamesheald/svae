@@ -53,260 +53,93 @@ class RPM:
             # "delta_f_tilde_params": self.delta_nat_f_tilde.init(delta_f_tilde_key),
         }
 
-    # def kl_posterior_prior(self, posterior_params, prior_params, 
-    #                        samples=None):
-    #     posterior = self.posterior.distribution(posterior_params)
-    #     prior = self.prior.distribution(prior_params)
-    #     if samples is None:
-    #         return posterior.kl_divergence(prior)
-    #     else:
-    #         return np.mean(posterior.log_prob(samples) - prior.log_prob(samples))
-
     def elbo(self, key, data, target, # Added the new target parameter 
-             u, batch_id, prior_params_batch, RPM_batch, model_params, sample_kl=False, **params):
-        # rec_params = model_params["rec_params"]
-        # prior_params = self.prior.get_constrained_params(model_params["prior_params"], u)
+             u, batch_id, prior, posterior, prior_marg, posterior_marg, RPM_batch, model_params, sample_kl=False, **params):
 
-        current_prior_params = tree_map(lambda x: x[batch_id], prior_params_batch)
+        J_prior, h_prior = prior
+        J_posterior, h_posterior = posterior
+        J_prior_marg, h_prior_marg = prior_marg
+        J_posterior_marg, h_posterior_marg = posterior_marg
 
-        potential = {}
-        # potential['J'] = RPM_batch["J"][batch_id] - MM_prior["J"]
-        # potential['h'] = RPM_batch["h"][batch_id] - MM_prior["h"]
-        # potential['Sigma'] = vmap(lambda J, I: psd_solve(J + np.eye(3) * (abs(np.linalg.eigvals(J).min()) + 1e-4), I), in_axes=(0, None))(potential["J"], np.eye(self.prior.latent_dims))
-        # potential['mu'] = np.einsum("ijk,ik->ij", potential['Sigma'], potential['h'])
-        potential['Sigma'] = RPM_batch["Sigma"][batch_id]
-        potential['mu'] = RPM_batch["mu"][batch_id]
+        # normalised_auxillary_J_full = J_posterior - prior_J[batch_id][None]
+        # normalised_auxillary_h_full = h_posterior - prior_h[batch_id][None]
+        # if train_params['use_ansatz']:
 
-        # Update: it makes more sense that inference is done in the posterior object
-        posterior_params = self.posterior.infer(current_prior_params, potential, u)
+        #     normalised_auxillary_J_full += J_posterior[batch_id][None]
+        #     normalised_auxillary_h_full += h_posterior[batch_id][None]
 
-        if params['stop_grad_q']:
+        # normalised_auxillary_J = np.zeros((batch_size, n_timepoints, x_dim, x_dim))
+        # normalised_auxillary_h = np.zeros((batch_size, n_timepoints, x_dim))
+        # for batch_id in range(batch_size):
+        #     for t in range(n_timepoints):
+        #         normalised_auxillary_J = prior_J + RPM_batch["J"] - prior_J[batch_id][None] + posterior_J[None] normalised_auxillary_J.at[batch_id,t,:,:].set(normalised_auxillary_J_full)
+        #         normalised_auxillary_h = normalised_auxillary_h.at[batch_id,t,:].set(normalised_auxillary_h_full)
 
-            posterior_params = stop_gradient(posterior_params)
+        # normalised_auxillary_log_normaliser = vmap(vmap(self.log_normaliser))(normalised_auxillary_J, normalised_auxillary_h)
 
-        # def node_potential(mu, L):
+        # RPM_log_normaliser = vmap(vmap(self.log_normaliser))(prior_J + RPM_batch["J"], prior_h + RPM_batch["h"])
 
-        #     # chapter 2.2.7.1 in Murphy, Probabilistic Machine Learning: Advanced Topics
+        # log_gamma = ((normalised_auxillary_log_normaliser - RPM_log_normaliser)[batch_id] \
+        #             - logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0)).sum()
 
-        #     g = - 0.5 * (mu @ L @ mu + mu.size * np.log(2 * np.pi) + np.log(np.linalg.det(np.linalg.inv(L))))
-        #     K = L
-        #     h = L @ mu
-
-        #     return g, K, h
-
-        # def edge_potential(A, b, L):
-
-        #     # chapter 2.2.7.5 in Murphy, Probabilistic Machine Learning: Advanced Topics
-        #     # potential over (x_{t - 1}, x_t) or (x_t, y_t), in that order
-
-        #     g = - 0.5 * (b @ L @ b + b.size * np.log(2 * np.pi) + np.log(np.linalg.det(np.linalg.inv(L)))) # is b.size correct dim?
-        #     K = np.block([[A.T @ L @ A, - A.T @ L], [- L @ A, L]]) # is A transpose the right way?
-        #     h = np.concatenate((- A.T @ L @ b, L @ b))
-
-        #     return g, K, h
-
-        # # transition potential
-        # gT, KT, hT = edge_potential(prior_params['m1'], prior_params['B'] @ u[t - 1], np.linalg.inv(prior_params['Q']))
-
-        # prior_mu = np.zeros((x_dim, T))
-        # prior_cov = np.zeros((x_dim, x_dim, T))
-        # posterior_mu = np.zeros((x_dim, T))
-        # posterior_cov = np.zeros((x_dim, x_dim, T))
-        # n = 0
-        # for t in range(T):
-
-        #     if t == 0:
-
-        #         prior_mu[:, t] = mu0
-        #         prior_cov[:, :, t] = np.linalg.inv(L0)
-
-        #     else:
-
-        #         prior_mu[:, t] = A @ prior_mu[:, t - 1] + b
-        #         prior_cov[:, :, t] = np.linalg.inv(Lx) + A @ prior_cov[:, :, t - 1] @ A.T
-
-        #     posterior_cov[:, :, t] = np.linalg.inv(np.linalg.inv(prior_cov[:, :, t]) + C.T @ Ly @ C)
-        #     posterior_mu[:, t] = posterior_cov[:, :, t] @ (C.T @ Ly @ (y[:, t, n] - d) + np.linalg.inv(prior_cov[:, :, t]) @ prior_mu[:, t])
-
-        #         # prior potential
-        # g0, K0, h0 = node_potential(prior_params['m1'], np.linalg.inv(prior_params['Q1']))
-
-        # g = g0
-        # K = np.zeros((x_dim * T, x_dim * T))
-        # K = K.at[].set(K0)
-        # h = np.zeros((x_dim * T))
-        # h = h.at[].set(h0)
-        # for t in range(T):
-
-        #     if t == 0:
-
-        #         # prior
-        #         g += g0
-        #         K[:x_dim, :x_dim] += K0
-        #         h[:x_dim] += h0
-
-        #     else:
-
-        #         # transition
-        #         g += gT
-        #         K[x_dim * (t - 1) : x_dim * (t + 1), x_dim * (t - 1) : x_dim * (t + 1)] += KT
-        #         h[x_dim * (t - 1) : x_dim * (t + 1)] += hT
-
-        #     # multiply by posterior factor (role of RPM factor)
-        #     K[x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)] += np.linalg.inv(posterior_cov[:, :, t])
-        #     h[x_dim * t : x_dim * (t + 1)] += np.linalg.inv(posterior_cov[:, :, t]) @ posterior_mu[:, t]
-
-        #     # divide by marginal prior factor
-        #     K[x_dim * t : x_dim * (t + 1), x_dim * t : x_dim * (t + 1)] -= np.linalg.inv(prior_cov[:, :, t])
-        #     h[x_dim * t : x_dim * (t + 1)] -= np.linalg.inv(prior_cov[:, :, t]) @ prior_mu[:, t]
-
-
-
-
-        # Take samples under the posterior
-        # num_samples = params.get("obj_samples") or 1
-        # samples = self.posterior.sample(posterior_params, u, (num_samples,), key)
-
-        delta_q = self.delta_nat_q.apply(model_params["delta_q_params"], data)
-
-        # Compute kl terms
-        posterior = self.posterior.distribution(posterior_params)
-
-        # natural parameters of posterior marginals
-        post_Ex = posterior.expected_states
-        post_Sigma = posterior.smoothed_covariances
-        posterior_J = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(post_Sigma, np.eye(self.prior.latent_dims))
-        posterior_h = np.einsum("ijk,ik->ij", posterior_J, post_Ex)   
-
-        if params['use_delta_nat_q']:
-        
-            posterior_J += delta_q['J']
-            posterior_h += delta_q['h']
-            posterior._smoothed_covariances = vmap(lambda J, I: psd_solve(J, I), in_axes=(0, None))(posterior_J, np.eye(self.prior.latent_dims))
-            posterior._smoothed_means = np.einsum("ijk,ik->ij", posterior.smoothed_covariances, posterior_h)   
-
-        # use all datapoints
-        # normalised_auxillary_J = posterior_J[None] + RPM_batch["J"] - MM_prior["J"][None]
-        # normalised_auxillary_h = posterior_h[None] + RPM_batch["h"] - MM_prior["h"][None]
-        prior_J = vmap(vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None)), in_axes=(0, None))(prior_params_batch["Sigma"], np.eye(self.prior.latent_dims))
-        prior_h = np.einsum("hijk,hik->hij", prior_J, prior_params_batch["Ex"])
-        normalised_auxillary_J = prior_J + RPM_batch["J"] - prior_J[batch_id][None] # i think this is equal to RPM_batch["J"] as prior_J is independnet of u
-        normalised_auxillary_h = prior_h + RPM_batch["h"] - prior_h[batch_id][None]
+        normalised_auxillary_J = J_prior_marg + RPM_batch["J"] - J_prior_marg[batch_id][None] # i think this is equal to RPM_batch["J"] as prior_J is independnet of u
+        normalised_auxillary_h = h_prior_marg + RPM_batch["h"] - h_prior_marg[batch_id][None]
         if params['use_ansatz']:
 
-            normalised_auxillary_J += posterior_J[None]
-            normalised_auxillary_h += posterior_h[None]
-        # normalised_auxillary_J = prior_params['J_aux'][batch_id][None] + RPM_batch["J"]
-        # normalised_auxillary_h = prior_params['h_aux'][batch_id][None] + RPM_batch["h"]
-
-        if params['use_delta_nat_f_tilde']:
-
-            delta_f_tilde = self.delta_nat_f_tilde.apply(model_params["delta_f_tilde_params"], data)
-            normalised_auxillary_J += delta_f_tilde['J'][None]
-            normalised_auxillary_h += delta_f_tilde['h'][None]
-
-        if params['use_delta_nat_f_tilde_np']:
-
-            normalised_auxillary_J += current_prior_params['J_aux'][batch_id][None]
-            normalised_auxillary_h += current_prior_params['h_aux'][batch_id][None]
-
-        kl_qp, kl_qf = self.kl_terms(params, posterior, current_prior_params, u, normalised_auxillary_J[batch_id], normalised_auxillary_h[batch_id], delta_q)
-        
-        # expected log auxiliary factors < log \tilde{f} >
-        # Murphy section 2.3.2.5
-        # auxillary_J = optimal_prior_params["prior_J"] - posterior_J
-        # auxillary_h = optimal_prior_params["prior_h"] - posterior_h
-        # E_log_aux = np.einsum("ij,ij->i", auxillary_h, post_Ex) - 0.5 * (np.einsum("ij,ij->i", post_Ex, np.einsum("ijk,ik->ij", auxillary_J, post_Ex)) + (auxillary_J * post_Sigma).sum(axis = (1, 2)))
-        # E_log_aux1 = np.einsum("ij,ij->i", auxillary_h, post_Ex)
-        # E_log_aux2 = - 0.5 * np.einsum("ij,ij->i", post_Ex, np.einsum("ijk,ik->ij", auxillary_J, post_Ex))
-        # E_log_aux3 = - 0.5 * (auxillary_J * post_Sigma).sum(axis = (1, 2))
-        # E_log_aux = E_log_aux1 + E_log_aux2 + E_log_aux3
-
-        # # use the current data point plus one other random data point
-        # batch_size = RPM_batch["J"].shape[0]
-        # timepoints = RPM_batch["J"].shape[1]
-        # probs = np.ones(batch_size) / (batch_size - 1)
-        # probs = probs.at[batch_id].set(0)
-        # sample_datapoint = jr.choice(key, np.concatenate([np.arange(batch_size)]), p = probs, shape=(timepoints,))
-
-        # RPM_J = np.concatenate((RPM_batch["J"][batch_id][None], RPM_batch["J"][sample_datapoint, np.arange(timepoints)][None]))
-        # RPM_h = np.concatenate((RPM_batch["h"][batch_id][None], RPM_batch["h"][sample_datapoint, np.arange(timepoints)][None]))
-
-        # # normalised_auxillary_J = posterior_J[None] + RPM_J - MM_prior["J"][None]
-        # # normalised_auxillary_h = posterior_h[None] + RPM_h - MM_prior["h"][None]
-        # normalised_auxillary_J = posterior_J[None] + RPM_J
-        # normalised_auxillary_h = posterior_h[None] + RPM_h
-
-        # normalised_auxillary_log_normaliser = self.log_normaliser(normalised_auxillary_J, normalised_auxillary_h)
-        # # RPM_log_normaliser = self.log_normaliser(RPM_J, RPM_h)
-        # RPM_log_normaliser = self.log_normaliser(optimal_prior_params["prior_J"] + RPM_J, optimal_prior_params["prior_h"] + RPM_h)
-
-        # log_Gamma = logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0, b=np.array([1, batch_size - 1])[:, None].repeat(timepoints, axis = 1)/batch_size)
-        # log_Gamma2 = (normalised_auxillary_log_normaliser - RPM_log_normaliser)[0]
+            normalised_auxillary_J += J_posterior_marg[batch_id][None]
+            normalised_auxillary_h += h_posterior_marg[batch_id][None]
 
         normalised_auxillary_log_normaliser = vmap(vmap(self.log_normaliser))(normalised_auxillary_J, normalised_auxillary_h)
 
-        # use optimal prior 
-        # RPM_log_normaliser = self.log_normaliser(optimal_prior_params["prior_J"][None] + RPM_batch["J"], optimal_prior_params["prior_h"][None] + RPM_batch["h"])
-
-        # use (action conditioned) prior
-        if params['use_prior_for_F']:
-
-            RPM_log_normaliser = vmap(vmap(self.log_normaliser))(prior_J + RPM_batch["J"], prior_h + RPM_batch["h"])
-
-        else:
-
-            RPM_log_normaliser = vmap(vmap(self.log_normaliser))(RPM_batch["J"], RPM_batch["h"])
+        RPM_log_normaliser = vmap(vmap(self.log_normaliser))(J_prior_marg + RPM_batch["J"], h_prior_marg + RPM_batch["h"])
 
         log_gamma = ((normalised_auxillary_log_normaliser - RPM_log_normaliser)[batch_id] \
                     - logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0)).sum()
 
+        # rpm_batch_J = prior_J + vmap(lambda J: block_diag(*J))(RPM_batch["J"])
+        # rpm_batch_h = prior_h + RPM_batch["h"].reshape(RPM_batch["h"].shape[0], -1)
+
+        # normalised_auxillary_J = rpm_batch - prior_J[batch_id][None] + posterior_J[batch_id][None]
+        # normalised_auxillary_h = rpm_batch_h - prior_h[batch_id][None] + posterior_h[batch_id][None]
+        # # if params['use_ansatz']:
+
+        # # normalised_auxillary_J += posterior_J[batch_id][None]
+        # # normalised_auxillary_h += posterior_h[batch_id][None]
+
+        # normalised_auxillary_log_normaliser = vmap(self.log_normaliser)(normalised_auxillary_J, normalised_auxillary_h)
+
+        # RPM_log_normaliser = vmap(vmap(self.log_normaliser))(rpm_batch, prior_h + RPM_batch["h"])
+
+        # log_gamma = ((normalised_auxillary_log_normaliser - RPM_log_normaliser)[batch_id] \
+        #             - logsumexp(normalised_auxillary_log_normaliser - RPM_log_normaliser, axis=0)).sum()
+
+        kl_qp = self.kl_qp_natural_parameters(J_posterior[batch_id], h_posterior[batch_id], J_prior[batch_id], h_prior[batch_id])
+        kl_qf = self.kl_qp_natural_parameters(J_posterior[batch_id], h_posterior[batch_id], block_diag(*normalised_auxillary_J[batch_id]), normalised_auxillary_h[batch_id].reshape(-1))
+
         # D = self.prior.latent_dims
-        # L = np.linalg.cholesky(RPM_batch["J"][batch_id] + 1e-9 * np.eye(D)[None])
-        # half_log_det = np.log(np.diagonal(L, axis1 = -2, axis2 = -1)).sum(-1)
-        # g_f = - 0.5 * (b @ RPM_batch["J"][batch_id] @ b + D * np.log(2 * math.pi) - 2 * half_log_det)
-        # L = np.linalg.cholesky(prior_J[batch_id] + 1e-9 * np.eye(D)[None])
-        # half_log_det = np.log(np.diagonal(L, axis1 = -2, axis2 = -1)).sum(-1)
-        # g_p = - 0.5 * (b @ L @ b + D * np.log(2 * math.pi) - 2 * half_log_det)
-        # g_f = vmap(self.log_normaliser)(prior_J + RPM_batch["J"][batch_id], prior_h + RPM_batch["h"][batch_id])
-        # g_p = vmap(self.log_normaliser)(prior_J, prior_h)
-        # kl_qp_correction = (vmap(self.log_normaliser)(RPM_batch["J"][batch_id], RPM_batch["h"][batch_id]) - g_f + g_p).sum()
-
-        # q_log_normaliser = self.posterior_log_normaliser(prior_params, prior_J, prior_h, RPM_batch, batch_id)
-
-        D = self.prior.latent_dims
-        T = RPM_log_normaliser.shape[1]
-        prior_precision_upper_diagonal = block_diag(np.zeros((0, D)), *current_prior_params["L"].transpose((0, 2, 1)), np.zeros((D, 0)))
-        prior_precision_main_diagonal = block_diag(*current_prior_params["J"])
-        prior_precision_lower_diagonal = block_diag(np.zeros((D, 0)), *current_prior_params["L"], np.zeros((0, D)))
-        prior_precision = prior_precision_upper_diagonal + prior_precision_main_diagonal + prior_precision_lower_diagonal
-        posterior_precision = prior_precision + block_diag(*solve(posterior._emissions_covariances, np.eye(D)[None]))
-
-        # log_normaliser_implied = self.log_normaliser(posterior_precision, posterior_precision @ posterior.expected_states.reshape(-1))
-        # kl_correction = log_normaliser_implied - q_log_normaliser
-
-        kl_qp = self.kl_qp_natural_parameters(posterior_precision, posterior_precision @ posterior.expected_states.reshape(-1), prior_precision, prior_precision @ current_prior_params["Ex"].reshape(-1))
-        kl_qf = self.kl_qp_natural_parameters(posterior_precision, posterior_precision @ posterior.expected_states.reshape(-1), block_diag(*normalised_auxillary_J[batch_id]), normalised_auxillary_h[batch_id].reshape(-1))
-
-        # batch_size = RPM_log_normaliser.shape[0]
-        # n_timepoints = RPM_log_normaliser.shape[1]
-        # T_log_N = n_timepoints * np.log(batch_size)
+        # T = RPM_batch["J"].shape[1]
+        # mean_difference = (mu_posterior - mu_prior)
+        # L = np.linalg.cholesky(J_posterior[batch_id] + 1e-9 * np.eye(D * T))
+        # half_log_det_posterior_precision = np.log(np.diagonal(L, axis1 = -2, axis2 = -1)).sum(-1)
+        # L = np.linalg.cholesky(J_prior[batch_id] + 1e-9 * np.eye(D * T))
+        # half_log_det_prior_precision = np.log(np.diagonal(L, axis1 = -2, axis2 = -1)).sum(-1)
+        # det_term = 2 * (half_log_det_posterior_precision - half_log_det_prior_precision)
+        # mean_diff_term = mean_difference @ J_prior[batch_id] @ mean_difference
+        # tr_term = np.trace(solve(J_posterior[batch_id], J_prior[batch_id]).T)
+        # kl_qp2 = 0.5 * (det_term + mean_diff_term + tr_term - D * T)
+        # kl_qp2 /= data.size
 
         kl_qp /= data.size
         kl_qf /= data.size
-        # kl_correction /= data.size
         log_gamma /= data.size
-        # T_log_N /= data.size
 
-        # free_energy = - (kl_qp + kl_correction) - (kl_qf + kl_correction) + log_gamma + T_log_N
-        free_energy = - kl_qp - kl_qf + log_gamma # + T_log_N - T_log_N
+        free_energy = - kl_qp - kl_qf + log_gamma
 
-        # kl /= target.size
-        # ell /= target.size
-        # elbo = ell - kl
+        Sigma_posterior = psd_solve(J_posterior[batch_id], np.eye(J_posterior[batch_id].shape[-1]))
+        mu_posterior = np.einsum("ij,j->i", Sigma_posterior, h_posterior[batch_id])
 
-        rpm_Sigma = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(prior_J[batch_id] + RPM_batch["J"][batch_id], np.eye(self.prior.latent_dims))
-        rpm_mu = np.einsum("ijk,ik->ij", rpm_Sigma, prior_h[batch_id] + RPM_batch["h"][batch_id])
+        # Sigma_prior = psd_solve(J_prior[batch_id], np.eye(J_prior[batch_id].shape[-1]))
+        # mu_prior = np.einsum("ij,j->i", Sigma_prior, h_prior[batch_id])
 
         return {
             "free_energy": free_energy,
@@ -322,9 +155,9 @@ class RPM:
             # "E_log_aux3": E_log_aux3.sum(),
             "log_Gamma": log_gamma,
             # "log_Gamma2": log_Gamma2.sum(),
-            "posterior_params": posterior_params,
-            "posterior_means": posterior.expected_states,
-            "rpm_means": rpm_mu
+            # "posterior_params": posterior_params,
+            "posterior_means": mu_posterior.reshape(data.shape[0], data.shape[1]),
+            "rpm_means": mu_posterior.reshape(data.shape[0], data.shape[1]),
             # "rpm_means": prior_J + RPM_batch["J"], prior_h + RPM_batch["h"]
             # 'log_normaliser_implied2': log_Z,
             # 'log_normaliser_implied': log_normaliser_implied,
@@ -339,9 +172,9 @@ class RPM:
             # "sample_kl": sample_kl,
         }
 
-    def compute_objective(self, key, data, target, u, batch_id, prior_params_batch, RPM_batch, model_params, **params):
+    def compute_objective(self, key, data, target, u, batch_id, prior, posterior, prior_marg, posterior_marg, RPM_batch, model_params, **params):
         if params["inference_method"] == "rpm":
-            results = self.elbo(key, data, target, u, batch_id, prior_params_batch, RPM_batch, model_params, **params)
+            results = self.elbo(key, data, target, u, batch_id, prior, posterior, prior_marg, posterior_marg, RPM_batch, model_params, **params)
             results["objective"] = results["free_energy"]
         elif params["inference_method"] == "lds":
             lds = LDS(data.shape[-1], u.shape[-1], data.shape[0])

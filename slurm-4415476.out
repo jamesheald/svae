@@ -1,0 +1,212 @@
+Launching a python run
+Sat Jan 27 17:39:47 UTC 2024
+2024-01-27 17:40:07.660396: I external/xla/xla/service/service.cc:145] XLA service 0x1c13d80 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+2024-01-27 17:40:07.660462: I external/xla/xla/service/service.cc:153]   StreamExecutor device (0): NVIDIA RTX A4500, Compute Capability 8.6
+2024-01-27 17:40:07.664416: I external/xla/xla/pjrt/gpu/se_gpu_pjrt_client.cc:738] Using BFC allocator.
+2024-01-27 17:40:07.664539: I external/xla/xla/pjrt/gpu/gpu_helpers.cc:105] XLA backend allocating 15868821504 bytes on device 0 for BFCAllocator.
+devices: [cuda(id=0)]
+save_dir /nfs/nhome/live/jheald/svae/runs/NoDeltaQ_NoDeltaF_NoDeltaFNP_NoFTimeDepend_NoAnsatz_MyInference_svae_seed0
+reload_state False
+reload_dir /nfs/nhome/live/jheald/svae/runs/first_attempt
+log_to_wandb True
+project_name RPM-LDS
+log_every_n_epochs 100
+use_linear_rpm False
+use_delta_nat_q False
+stop_grad_q False
+use_ansatz True
+use_prior_for_F True
+use_delta_nat_f_tilde False
+use_delta_nat_f_tilde_np False
+zero_last_layers False
+f_time_dependent False
+use_my_inference True
+jax_seed 0
+latent_dims 3
+emission_dims 3
+input_dims 1
+inference_method rpm
+rec_trunk_features [50, 50, 50]
+rec_head_mean_features []
+rec_head_var_features []
+rec_diagonal_covariance False
+GRU_dim 50
+use_parallel_kf True
+mask_size 0
+mask_start 0
+train_size 100
+val_size 100
+train_batch_size 100
+val_batch_size 100
+early_stop_start 20000
+min_delta 0.001
+patience 25
+max_iters 20000
+checkpoint_every_n_epochs 100
+base_lr 0.001
+lr_decay False
+prior_base_lr 0.001
+prior_lr_warmup False
+delta_nat_f_tilde_lr 0.001
+max_grad_norm 10.0
+weight_decay 0.0
+beta_transition_begin 1000
+beta_transition_steps 1000
+num_trials 100
+num_timesteps 100
+snr large
+latent_dims_dataset 3
+emission_dims_dataset 3
+input_dims_dataset 1
+2024-01-27 17:40:22.537067: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2024-01-27 17:40:22.537289: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2024-01-27 17:40:23.116864: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2024-01-27 17:40:24.201368: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2024-01-27 17:40:30.195493: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+2024-01-27 17:40:55.334391: I external/xla/xla/stream_executor/cuda/cuda_dnn.cc:456] Loaded cuDNN version 8906
+2024-01-27 17:40:55.560757: I external/tsl/tsl/platform/default/subprocess.cc:308] Start cannot spawn child process: No such file or directory
+2024-01-27 17:40:55.697130: I external/tsl/tsl/platform/default/subprocess.cc:308] Start cannot spawn child process: No such file or directory
+2024-01-27 17:40:55.700593: I external/tsl/tsl/platform/default/subprocess.cc:308] Start cannot spawn child process: No such file or directory
+Total number of runs: 1
+Base paramerters:
+{'GRU_dim': 50,
+ 'base_lr': 0.001,
+ 'beta_transition_begin': 1000,
+ 'beta_transition_steps': 1000,
+ 'checkpoint_every_n_epochs': 100,
+ 'delta_nat_f_tilde_lr': 0.001,
+ 'early_stop_start': 20000,
+ 'emission_dims': 3,
+ 'emission_dims_dataset': 3,
+ 'f_time_dependent': False,
+ 'inference_method': 'rpm',
+ 'input_dims': 1,
+ 'input_dims_dataset': 1,
+ 'jax_seed': 0,
+ 'latent_dims': 3,
+ 'latent_dims_dataset': 3,
+ 'log_every_n_epochs': 100,
+ 'log_to_wandb': True,
+ 'lr_decay': False,
+ 'mask_size': 0,
+ 'mask_start': 0,
+ 'max_grad_norm': 10.0,
+ 'max_iters': 20000,
+ 'min_delta': 0.001,
+ 'num_timesteps': 100,
+ 'num_trials': 100,
+ 'patience': 25,
+ 'prior_base_lr': 0.001,
+ 'prior_lr_warmup': False,
+ 'project_name': 'RPM-LDS',
+ 'rec_diagonal_covariance': False,
+ 'rec_head_mean_features': [],
+ 'rec_head_var_features': [],
+ 'rec_trunk_features': [50, 50, 50],
+ 'reload_dir': '/nfs/nhome/live/jheald/svae/runs/first_attempt',
+ 'reload_state': False,
+ 'save_dir': '/nfs/nhome/live/jheald/svae/runs/NoDeltaQ_NoDeltaF_NoDeltaFNP_NoFTimeDepend_NoAnsatz_MyInference_svae_seed0',
+ 'snr': 'large',
+ 'stop_grad_q': False,
+ 'train_batch_size': 100,
+ 'train_size': 100,
+ 'use_ansatz': True,
+ 'use_delta_nat_f_tilde': False,
+ 'use_delta_nat_f_tilde_np': False,
+ 'use_delta_nat_q': False,
+ 'use_linear_rpm': False,
+ 'use_my_inference': True,
+ 'use_parallel_kf': True,
+ 'use_prior_for_F': True,
+ 'val_batch_size': 100,
+ 'val_size': 100,
+ 'weight_decay': 0.0,
+ 'zero_last_layers': False}
+##########################################
+Starting run #0
+##########################################
+{'GRU_dim': 50,
+ 'base_lr': 0.001,
+ 'beta_transition_begin': 1000,
+ 'beta_transition_steps': 1000,
+ 'checkpoint_every_n_epochs': 100,
+ 'delta_nat_f_tilde_lr': 0.001,
+ 'early_stop_start': 20000,
+ 'emission_dims': 3,
+ 'emission_dims_dataset': 3,
+ 'f_time_dependent': False,
+ 'inference_method': 'rpm',
+ 'input_dims': 1,
+ 'input_dims_dataset': 1,
+ 'jax_seed': 0,
+ 'latent_dims': 3,
+ 'latent_dims_dataset': 3,
+ 'log_every_n_epochs': 100,
+ 'log_to_wandb': True,
+ 'lr_decay': False,
+ 'mask_size': 0,
+ 'mask_start': 0,
+ 'max_grad_norm': 10.0,
+ 'max_iters': 20000,
+ 'min_delta': 0.001,
+ 'num_timesteps': 100,
+ 'num_trials': 100,
+ 'patience': 25,
+ 'prior_base_lr': 0.001,
+ 'prior_lr_warmup': False,
+ 'project_name': 'RPM-LDS',
+ 'rec_diagonal_covariance': False,
+ 'rec_head_mean_features': [],
+ 'rec_head_var_features': [],
+ 'rec_trunk_features': [50, 50, 50],
+ 'reload_dir': '/nfs/nhome/live/jheald/svae/runs/first_attempt',
+ 'reload_state': False,
+ 'rnn_dims': 10,
+ 'save_dir': '/nfs/nhome/live/jheald/svae/runs/NoDeltaQ_NoDeltaF_NoDeltaFNP_NoFTimeDepend_NoAnsatz_MyInference_svae_seed0',
+ 'snr': 'large',
+ 'stop_grad_q': False,
+ 'train_batch_size': 100,
+ 'train_size': 100,
+ 'use_ansatz': True,
+ 'use_delta_nat_f_tilde': False,
+ 'use_delta_nat_f_tilde_np': False,
+ 'use_delta_nat_q': False,
+ 'use_linear_rpm': False,
+ 'use_my_inference': True,
+ 'use_parallel_kf': True,
+ 'use_prior_for_F': True,
+ 'val_batch_size': 100,
+ 'val_size': 100,
+ 'weight_decay': 0.0,
+ 'zero_last_layers': False}
+Loading dataset!
+Data MLL:  -0.7839599
+R2_optimal_infernece state_0 0.9974212977922021
+R2_optimal_infernece state_1 0.9921231857631772
+R2_optimal_infernece state_2 0.9992198177810598
+  0%|          | 0/20000 [00:00<?, ?it/s][jit compling...]:   0%|          | 0/20000 [00:00<?, ?it/s][jit compling...]:   0%|          | 0/20000 [00:19<?, ?it/s]
+Run errored out due to some the following reason:
+Traceback (most recent call last):
+  File "/nfs/nhome/live/jheald/svae/svae/training.py", line 174, in experiment_scheduler
+    _single_run(data_out, model_out)
+  File "/nfs/nhome/live/jheald/svae/svae/training.py", line 143, in _single_run
+    results = train_func(model_dict, data_dict, curr_params)
+  File "/nfs/nhome/live/jheald/svae/svae/experiments.py", line 138, in start_trainer
+    trainer.train(data_dict, run_params["run_type"],
+  File "/nfs/nhome/live/jheald/svae/svae/training.py", line 469, in train
+    aux['R2_train_states'], predicted_states = R2_inferred_vs_actual_states(posterior_means, train_states_batch)
+  File "/nfs/nhome/live/jheald/svae/svae/utils.py", line 38, in R2_inferred_vs_actual_states
+    reg.fit(posterior_means, true_states) # reg.predict(posterior_means) = posterior_means @ reg.coef_.T + reg.intercept_
+  File "/nfs/nhome/live/jheald/.conda/envs/svae/lib/python3.9/site-packages/sklearn/base.py", line 1152, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+  File "/nfs/nhome/live/jheald/.conda/envs/svae/lib/python3.9/site-packages/sklearn/linear_model/_base.py", line 678, in fit
+    X, y = self._validate_data(
+  File "/nfs/nhome/live/jheald/.conda/envs/svae/lib/python3.9/site-packages/sklearn/base.py", line 622, in _validate_data
+    X, y = check_X_y(X, y, **check_params)
+  File "/nfs/nhome/live/jheald/.conda/envs/svae/lib/python3.9/site-packages/sklearn/utils/validation.py", line 1164, in check_X_y
+    check_consistent_length(X, y)
+  File "/nfs/nhome/live/jheald/.conda/envs/svae/lib/python3.9/site-packages/sklearn/utils/validation.py", line 407, in check_consistent_length
+    raise ValueError(
+ValueError: Found input variables with inconsistent numbers of samples: [100, 10000]
+mv: cannot move '/nfs/nhome/live/jheald/svae/slurm-4415476.out' to '/nfs/nhome/live/jheald/svae/runs//nfs/nhome/live/jheald/svae/runs/NoDeltaQ_NoDeltaF_NoDeltaFNP_NoFTimeDepend_NoAnsatz_MyInference_svae_seed0/': No such file or directory

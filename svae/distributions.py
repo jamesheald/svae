@@ -12,6 +12,8 @@ from dynamax.linear_gaussian_ssm.inference import make_lgssm_params, lgssm_smoot
 from dynamax.utils.utils import psd_solve
 from jax.numpy.linalg import solve
 
+from jax.lax import scan
+
 from functools import partial
 
 from svae.inference import lgssm_log_normalizer, parallel_lgssm_smoother, _make_associative_sampling_elements
@@ -59,7 +61,7 @@ class LinearGaussianChain:
         expected_states_squared = covariances + np.einsum("...i,...j->...ij", Ex, Ex)
         expected_states_next_states = np.einsum("...ij,...jk->...ik",
                                                 covariances[:-1], dynamics_matrix[1:]) + np.einsum("...i,...j->...ji",
-                                                                                                   Ex[:-1], Ex[1:])
+                                                                                                   Ex[:-1], Ex[1:]) # THIS LOOKS WRONG!  dynamic matrix and last term need to be transposed 
         return cls(dynamics_matrix, dynamics_bias, noise_covariance,
                    expected_states, covariances, expected_states_squared, expected_states_next_states)
 
@@ -432,15 +434,41 @@ class ParallelLinearGaussianSSM(LinearGaussianSSM):
 
         # Compute ExxT
         A, Q = dynamics_params["A"], dynamics_params["Q"]
+        # filtered_mean = smoothed["filtered_means"]
         filtered_cov = smoothed["filtered_covariances"]
         smoothed_cov = smoothed["smoothed_covariances"]
         smoothed_mean = smoothed["smoothed_means"]
         G = vmap(lambda C: psd_solve(Q + A @ C @ A.T, A @ C).T)(filtered_cov)
 
         # Compute the smoothed expectation of z_t z_{t+1}^T
+        # https://www.ml.cmu.edu/research/dap-papers/dap_boots.pdf eq 5f, Learning Stable Linear Dynamical Systems, Byron Boots
+        # https://users.aalto.fi/~ssarkka/pub/ParameterEstimation_preprint.pdf eq 6, Expectation Maximization Based Parameter Estimation by Sigma-Point and Particle Smoothing
         smoothed_cross = vmap(
             lambda Gt, mean, next_mean, next_cov: Gt @ next_cov + np.outer(mean, next_mean)) \
             (G[:-1], smoothed_mean[:-1], smoothed_mean[1:], smoothed_cov[1:])
+
+        # def get_smoothed_cross(carry, inputs):
+
+        #     smoothed_cross_next, A = carry
+        #     filtered_cov_next, G, G_next = inputs
+
+        #     smoothed_cross = filtered_cov_next @ G.T + G_next @ (smoothed_cross_next - A @ filtered_cov_next) @ G.T
+
+        #     carry = smoothed_cross, A
+        #     outputs = smoothed_cross
+
+        #     return carry, outputs
+
+        # dim = A.shape[-1]
+        # C = np.eye(dim)
+        # P = A @ filtered_cov[-2] @ A.T + Q
+        # K = psd_solve(C @ P @ C.T + emissions_potentials["Sigma"][-1], C @ P.T).T
+        # smoothed_cross_last = (np.eye(dim) - K @ C) @ A @ filtered_cov[-2]
+
+        # carry = smoothed_cross_last, A
+        # inputs = filtered_cov[1:-1], G[:-2], G[1:-1]
+        # _, smoothed_cross_prev = scan(get_smoothed_cross, carry, inputs, reverse=True)
+        # smoothed_cross = np.concatenate((smoothed_cross_prev, smoothed_cross_last[None])).transpose(0,2,1) # tranpose to get the smoothed expectation of z_t z_{t+1}^T
 
         log_Z = lgssm_log_normalizer(dynamics_params,
                                      smoothed["filtered_means"],

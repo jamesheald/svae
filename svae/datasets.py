@@ -7,7 +7,7 @@ from flax.core import frozen_dict as fd
 
 import tensorflow_probability.substrates.jax.distributions as tfd
 
-from svae.utils import random_rotation, get_scaler
+from svae.utils import random_rotation, get_scaler, R2_inferred_vs_actual_states
 from svae.priors import LinearGaussianChainPrior
 from svae.posteriors import LDSSVAEPosterior
 
@@ -65,7 +65,7 @@ class LDS(LinearGaussianChainPrior):
         posterior_ll = posterior.log_prob(states, u=u)
         # This is numerically unstable!
         lps = joint_ll - posterior_ll # log p(x, y) - log p(x|y) = log p(x) + log p(y|x) - log p(x|y) = log p(y)
-        return lps
+        return lps, posterior.mean
 
 def sample_lds_dataset(run_params):    
     d = run_params["dataset_params"]
@@ -80,7 +80,7 @@ def sample_lds_dataset(run_params):
 
     data_dict = {}
 
-    seed = d["seed"]
+    seed = jr.PRNGKey(run_params["jax_seed"])
     emission_dims = d["emission_dims"]
     latent_dims = d["latent_dims"]
     input_dims = d["input_dims"]
@@ -93,7 +93,9 @@ def sample_lds_dataset(run_params):
     R = emission_cov * np.eye(emission_dims)
     Q = dynamics_cov * np.eye(latent_dims)
     C = jr.normal(seed_C, shape=(emission_dims, latent_dims))
+    # C = np.eye(emission_dims)
     d = jr.normal(seed_d, shape=(emission_dims,))
+    # d = np.zeros(emission_dims,)
     B = jr.normal(seed_B, shape=(latent_dims, input_dims))
 
     # Here we let Q1 = Q
@@ -115,7 +117,7 @@ def sample_lds_dataset(run_params):
     # sinusoidal controls with random phase
     u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
     u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
-    u = u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
+    u = u.transpose(0,2,1) * 0.# num_trials x num_timesteps x input_dims
 
     # constrained = lds.get_constrained_params
 
@@ -125,16 +127,26 @@ def sample_lds_dataset(run_params):
 
     states, data = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(u, jr.split(seed_sample, num_trials))
     
-    mll = vmap(lds.marginal_log_likelihood, in_axes=(None, 0, 0))(params, u, data)
+    mll, posterior_mean = vmap(lds.marginal_log_likelihood, in_axes=(None, 0, 0))(params, u, data)
     mll = np.sum(mll) / data.size
     print("Data MLL: ", mll)
+
+    # collapse trials and timepoints into one sequence
+    states_reshaped = states.reshape(-1, states.shape[-1])
+    posterior_means = posterior_mean.reshape(-1, posterior_mean.shape[-1])
+    # R2_optimal_infernece, predicted_states = R2_inferred_vs_actual_states(posterior_means, states_reshaped)
+    R2_optimal_infernece = []
+    for idim in range(3):
+        R2, predicted_states = R2_inferred_vs_actual_states(posterior_means, states_reshaped[:,idim])
+        R2_optimal_infernece.append(R2)
+        print("R2_optimal_infernece state_" + str(idim), R2_optimal_infernece[idim])
     
     seed_val, seed_u = jr.split(seed_sample)
 
     # sinusoidal controls with random phase
     u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
     val_u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
-    val_u = val_u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
+    val_u = val_u.transpose(0,2,1) * 0.# num_trials x num_timesteps x input_dims
 
     # val_states, val_data = lds.sample(params, val_u,
     #                           shape=(num_trials,), 
@@ -142,26 +154,42 @@ def sample_lds_dataset(run_params):
     val_states, val_data = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(val_u, jr.split(seed_val, num_trials))
 
     scaler_obs = get_scaler('standard')
+    scaler_states = get_scaler('standard')
     scaler_u = get_scaler('standard')
-    # data = np.concatenate((data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2) # concatenate time to data
-    # val_data = np.concatenate((val_data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2) # concatenate time to data
+    
+    # optionally concatenate time to data
+    if run_params['f_time_dependent']:
+        
+        data = np.concatenate((data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2)
+        val_data = np.concatenate((val_data, np.arange(num_timesteps)[None, :, None].repeat(num_trials, axis=0)),axis=2)
+    
     scaled_obs = scaler_obs.fit_transform(np.vstack((data.reshape(-1, data.shape[-1]), val_data.reshape(-1, val_data.shape[-1]))))
     scaled_u = scaler_u.fit_transform(np.vstack((u.reshape(-1, u.shape[-1]), val_u.reshape(-1, val_u.shape[-1]))))
+    scaled_states = scaler_states.fit_transform(np.vstack((states.reshape(-1, states.shape[-1]), val_states.reshape(-1, val_states.shape[-1]))))
 
     data_dict["generative_model"] = lds
     data_dict["marginal_log_likelihood"] = mll
+    
     data_dict["train_data"] = scaled_obs[:data[:,:,0].size].reshape(num_trials, num_timesteps, -1)
     data_dict["train_u"] = scaled_u[:u[:,:,0].size].reshape(num_trials, num_timesteps, -1)
-    data_dict["train_states"] = states
+    data_dict["train_states"] = scaled_states[:states[:,:,0].size].reshape(num_trials, num_timesteps, -1)
     data_dict["val_data"] = scaled_obs[data[:,:,0].size:].reshape(num_trials, num_timesteps, -1)
     data_dict["val_u"] = scaled_u[u[:,:,0].size:].reshape(num_trials, num_timesteps, -1)
-    data_dict["val_states"] = val_states
+    data_dict["val_states"] = scaled_states[states[:,:,0].size:].reshape(num_trials, num_timesteps, -1)
+    # data_dict["train_data"] = data
+    # data_dict["train_u"] = u
+    # data_dict["train_states"] = states
+    # data_dict["val_data"] = val_data
+    # data_dict["val_u"] = val_u
+    # data_dict["val_states"] = val_states
+
     data_dict["dataset_params"] = fd.freeze(run_params["dataset_params"])
     data_dict["lds_params"] = params
     
     data_dict["scaled_goal"] = np.array([1., 0., 0.]) # to stop an error being thrown as code expects this
     data_dict['scaler_obs'] = scaler_obs
     data_dict['scaler_u'] = scaler_u
+    data_dict['scaled_states'] = scaled_states
 
     return data_dict
 
@@ -193,7 +221,7 @@ def load_pendulum(run_params, log=False):
     train_trials = d["train_trials"]
     val_trials = d["val_trials"]
     noise_scale = d["emission_cov"] ** 0.5
-    key_train, key_val, key_pred = jr.split(d["seed"], 3)
+    key_train, key_val, key_pred = jr.split(jr.PRNGKey(d["jax_seed"]), 3)
 
     data = np.load("pendulum/pend_regression.npz")
 

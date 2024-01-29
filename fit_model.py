@@ -1,7 +1,5 @@
 # delta mu comented out in train and below
 # currently using non optimal prior
-# Q1/m1 changed in LDS dataset
-# u's zerod out
 
 ###############
 # compare performance with f_twiddles removed (set to 1)
@@ -36,7 +34,7 @@ run_params = {
     "latent_dims": 3,
     "emission_dims": 3,
     "input_dims": 1,
-    "rec_trunk_features": [512],
+    "rec_trunk_features": [50, 50, 50],
     "rec_head_mean_features": [],
     "rec_head_var_features": [],
     "rec_diagonal_covariance" : False,
@@ -52,12 +50,12 @@ run_params = {
     "prior_lr_warmup": False,
     "max_grad_norm": 10,
     "weight_decay": 0.0000, # 0.0001
-    "max_iters": 1000,
+    "max_iters": 10000,
     "beta_transition_begin": 1000,
     "beta_transition_steps": 1000,
-    "early_stop_start": 1000, # start after beta reaches 1
+    "early_stop_start": 5000, # start after beta reaches 1
     "min_delta": 1e-3,
-    "patience": 10, # 10
+    "patience": 25, # 10
     "checkpoint_every_n_epochs": 5, # 10
     "log_to_wandb": False,
     "log_every_n_epochs": 10,
@@ -76,11 +74,9 @@ all_results, all_models = run_lds(run_params)
 # run_params = expand_lds_parameters(run_params)
 # data_dict = sample_lds_dataset(run_params)
 
-breakpoint()
-
 # all_results, all_models = run_pendulum_control(run_params)
 
-# all_results[0]: trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.opts, trainer.opt_states, trainer.ckptrs
+# all_results[0]: trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.R2_val_states, trainer.opts, trainer.opt_states, trainer.ckptrs
 
 # all_results[0][0] # model deepLDS object (? == all_models[0]['model'])
 # all_results[0][1] # params dict_keys(['dec_params', 'post_params', 'post_samples', 'prior_params', 'rec_params']), e.g. all_results[0][1]['prior_params'] 
@@ -90,11 +86,10 @@ breakpoint()
 # all_models[0]['model'].prior.get_dynamics_params()
 
 from matplotlib import pyplot as plt
-# plt.plot(all_results[0][2] ,'r') # train loss
-# plt.plot(all_results[0][3], 'b') # val loss
-# plt.show(block = False)
-
-breakpoint()
+plt.figure()
+plt.plot(all_results[0][2] ,'r') # train loss
+plt.plot(all_results[0][3], 'b') # val loss
+plt.show(block = False)
 
 from svae.experiments import expand_lds_parameters
 from svae.datasets import sample_lds_dataset, load_pendulum_control_data
@@ -117,7 +112,7 @@ rec_params = states[0]['params']
 model = model_dict['model']
 
 import numpy as np
-from svae.utils import lie_params_to_constrained, construct_dynamics_matrix, scale_matrix_by_norm
+from svae.utils import lie_params_to_constrained, construct_dynamics_matrix, scale_matrix_by_norm, truncate_singular_values
 
 n_timepoints = 100
 z_dim = 3
@@ -126,12 +121,11 @@ y_dim = 3
 m1 = prior_params['m1']
 Q1 = lie_params_to_constrained(prior_params['Q1'], z_dim)
 # Q1 = np.diag(np.exp(all_results[0][1]['prior_params']['Q1']))
-A = construct_dynamics_matrix(prior_params["A_u"], prior_params["A_v"], prior_params["A_s"], z_dim)
+# A = construct_dynamics_matrix(prior_params["A_u"], prior_params["A_v"], prior_params["A_s"], z_dim)
+A = truncate_singular_values(prior_params["A"])
 B = scale_matrix_by_norm(prior_params['B'])
 Q = lie_params_to_constrained(prior_params['Q'], z_dim)
 # Q = np.diag(np.exp(all_results[0][1]['prior_params']['Q']))
-
-breakpoint()
 
 # RPM_goal = model.recognition.apply(rec_params, data_dict["scaled_goal"])
 # # compute optimal feedback gain matrix K
@@ -195,7 +189,8 @@ for r in range(n_rollouts):
         if t < n_timepoints - 1:
             m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, action, Q)
 plt.figure()
-plt.plot(y, 'r')
+# plt.plot(y, 'r')
+plt.plot(data_dict["train_states"][0, :, :], 'r')
 plt.plot(m[r, :, :].T, 'g--')
 if run_params["inference_method"] != "rpm":
     plt.plot(y_recon, 'b--')
@@ -224,7 +219,8 @@ for r in range(n_rollouts):
         if t < n_timepoints - 1:
             m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, action, Q)
 plt.figure()
-plt.plot(y, 'r')
+# plt.plot(y, 'r')
+plt.plot(data_dict["train_states"][0, :, :], 'r')
 plt.plot(m[r, :, :].T, 'g--')
 if run_params["inference_method"] != "rpm":
     plt.plot(y_recon, 'b--')
@@ -253,7 +249,8 @@ for r in range(n_rollouts):
         if t < n_timepoints - 1:
             m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, action, Q)
 plt.figure()
-plt.plot(y, 'r')
+# plt.plot(y, 'r')
+plt.plot(data_dict["train_states"][0, :, :], 'r')
 plt.plot(m[r, :, :].T, 'g--')
 if run_params["inference_method"] != "rpm":
     plt.plot(y_recon, 'b--')
@@ -265,7 +262,7 @@ import gym
 from jax import numpy as np
 from jax.lax import scan
 
-env = gym.make('Pendulum-v1')
+env = gym.make('Pendulum-v1', render_mode="human") # rgb_array
 
 def get_previous_P(carry, inputs):
 
@@ -305,7 +302,7 @@ if run_params["inference_method"] != "rpm":
 observations_present = True
 rew = np.zeros((n_rollouts, n_timepoints))
 for r in range(n_rollouts):
-    obs = env.reset()
+    obs = env.reset()[0]
     for t in range(n_timepoints - 1):
         if observations_present:
             obs = data_dict['scaler_obs'].transform(obs[None]).squeeze()
@@ -315,9 +312,9 @@ for r in range(n_rollouts):
             y_recon[t, :] = all_models[0]['model'].decoder.apply(all_results[0][1]['dec_params'], m[:, t]).mean() # .covariance()
         m[r, :, t + 1], P[r, :, :, t + 1] = predict_next_state(m[r, :, t], P[r, :, :, t], A, B, u[r, t], Q)
         action = data_dict['scaler_u'].inverse_transform(u[r, t, :][None])[:, 0]
-        obs, reward, done, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
         rew[r, t] = reward
-        env.render("human")
+        env.render()
     print("cumulative reward", rew[r, :].sum())
 env.close()
 # plt.figure()

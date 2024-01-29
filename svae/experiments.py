@@ -19,7 +19,7 @@ from svae.posteriors import DKFPosterior, CDKFPosterior, PlaNetPosterior, LDSSVA
 from svae.priors import LinearGaussianChainPrior, LieParameterizedLinearGaussianChainPrior
 from svae.networks import GaussianRecognition, GaussianBiRNN, TemporalConv, \
     GaussianEmission, GaussianDCNNEmission, GaussianDCNNEmissionFixedCovariance, \
-    PlaNetRecognitionWrapper, RPM
+    PlaNetRecognitionWrapper, RPM, F_Tilde, delta_q, nonparametric_natural_parameters, linear_rpm
 from svae.training import Trainer, experiment_scheduler, svae_pendulum_val_loss, svae_init, svae_loss, svae_update
 from svae.svae import DeepLDS
 from svae.rpm import RPMLDS
@@ -43,7 +43,7 @@ def init_model(run_params, data_dict):
     input_shape = data_dict["train_data"].shape[1:]
     num_timesteps = input_shape[0]
     data = data_dict["train_data"]
-    seed = p["seed"]
+    seed = jr.PRNGKey(p["jax_seed"])
     seed_model, seed_elbo, seed_ems, seed_rec = jr.split(seed, 4)
 
     run_type = p["run_type"]
@@ -70,21 +70,34 @@ def init_model(run_params, data_dict):
     elif p["inference_method"] == "planet":
         posterior = PlaNetPosterior(p["posterior_architecture"],
                                     latent_dims, num_timesteps)
-    elif p["inference_method"] == "svae" or p["inference_method"] == "rpm":
+    elif p["inference_method"] == "svae" or p["inference_method"] == "rpm" or p["inference_method"] == "lds":
         # The parallel Kalman stuff only applies to SVAE
         # Since RNN based methods are inherently sequential
         posterior = LDSSVAEPosterior(latent_dims, p["dataset_params"]["input_dims"], num_timesteps, 
                                      use_parallel=p.get("use_parallel_kf"))
 
-    if p["inference_method"] == "rpm":
+    if p["inference_method"] == "rpm" or p["inference_method"] == "lds":
+
+        if p["use_linear_rpm"]:
+            recognition = linear_rpm(z_dim=latent_dims)
+        else:
+            recognition = rec_net
+
         model = RPMLDS(
-                        recognition=rec_net,
+                        recognition=recognition,
                         prior=prior,
                         posterior=posterior,
+                        delta_nat_q=delta_q(carry_dim=p["GRU_dim"], z_dim=latent_dims), 
+                        # delta_nat_q=rec_net, 
+                        # delta_nat_f_tilde=F_Tilde.from_params(**p["recnet_architecture"]),
+                        delta_nat_f_tilde=rec_net,
+                        # delta_nat_f_tilde=nonparametric_natural_parameters(batch_size=data_dict["train_data"].shape[0],n_timesteps=num_timesteps,z_dim=latent_dims),
+                        # delta_nat_f_tilde=delta_q(carry_dim=p["GRU_dim"], z_dim=latent_dims),
                         input_dummy=np.zeros(input_shape),
                         latent_dummy=np.zeros((num_timesteps, latent_dims)),
                         u_dummy=np.zeros((num_timesteps, p["dataset_params"]["input_dims"]))
                     )
+
     else:
         model = DeepLDS(
                         recognition=rec_net,
@@ -124,10 +137,10 @@ def start_trainer(model_dict, data_dict, run_params):
         summary = None
     trainer.train(data_dict, run_params["run_type"],
                   max_iters=run_params["max_iters"],
-                  key=run_params["seed"],
+                  key=jr.PRNGKey(run_params["jax_seed"]),
                   callback=log_to_wandb, val_callback=validation_log_to_wandb,
                   summary=summary, min_delta=run_params["min_delta"], patience=run_params["patience"])
-    return (trainer.model, trainer.params, trainer.train_losses, trainer.val_losses, trainer.opts, trainer.opt_states, trainer.mngr)
+    return (trainer.model, trainer.params, trainer.train_losses, trainer.R2_train_states, trainer.val_losses, trainer.R2_val_states, trainer.opts, trainer.opt_states, trainer.mngr)
 
 MLP_recnet_architecture = {
     "diagonal_covariance": False,
@@ -284,10 +297,12 @@ DCNN_decnet_architecture = {
 
 # @title Run parameter expanders
 def get_lr(params, max_iters):
+    # https://optax.readthedocs.io/en/latest/api/optimizer_schedules.html
     base_lr = params["base_lr"]
     prior_base_lr = params["prior_base_lr"]
     lr = opt.constant_schedule(base_lr)
     prior_lr = opt.constant_schedule(prior_base_lr)
+    delta_nat_f_tilde_lr = opt.constant_schedule(params["delta_nat_f_tilde_lr"])
     pprint(params)
     if params["lr_decay"]:
         print("Using learning rate decay!")
@@ -305,7 +320,7 @@ def get_lr(params, max_iters):
     # warmup_end = 200
     # lr_warmup = opt.linear_schedule(0, base_lr, warmup_end, 0)
     # lr = opt.join_schedules([lr_warmup, lr], [warmup_end])
-    return lr, prior_lr
+    return lr, prior_lr, delta_nat_f_tilde_lr
 
 def get_beta_schedule(params):
     return opt.linear_schedule(0., 1., params.get("beta_transition_steps"), params.get("beta_transition_begin"))
@@ -340,10 +355,10 @@ def expand_lds_parameters(params):
     # D, H, N, C = latent_dims[params["dimensionality"]], params["rnn_dims"], emission_dims[params["dimensionality"]], input_dims[params["dimensionality"]]
     D, H, N, C = latent_dims, params["rnn_dims"], emission_dims, input_dims
     inf_params = {}
-    if (params["inference_method"] == "svae") or (params["inference_method"] == "rpm"):
+    if (params["inference_method"] == "svae") or (params["inference_method"] == "rpm") or (params["inference_method"] == "lds"):
         if (params["inference_method"] == "svae"):
             inf_params["recnet_class"] = "GaussianRecognition"
-        elif (params["inference_method"] == "rpm"):
+        elif (params["inference_method"] == "rpm") or (params["inference_method"] == "lds"):
             inf_params["recnet_class"] = "RPM"
         architecture = deepcopy(MLP_recnet_architecture)
         architecture["output_dim"] = D
@@ -401,7 +416,7 @@ def expand_lds_parameters(params):
     inf_params["decnet_architecture"] = decnet_architecture
     inf_params["recnet_architecture"] = architecture
 
-    lr, prior_lr = get_lr(params, max_iters)
+    lr, prior_lr, delta_nat_f_tilde_lr = get_lr(params, max_iters)
 
     extended_params = {
         "project_name": "SVAE-LDS-ICML-RE-1",
@@ -410,7 +425,7 @@ def expand_lds_parameters(params):
         # We're just doing model learning since we're lazy
         "run_type": "model_learning",
         "dataset_params": {
-            "seed": params.get("seed"),
+            "seed": jr.PRNGKey(params.get("jax_seed")),
             # "num_trials": train_trials[params["dataset_size"]],
             "num_trials": params.get("num_trials"),
             "num_timesteps": num_timesteps,
@@ -426,11 +441,12 @@ def expand_lds_parameters(params):
         "max_iters": max_iters,
         "elbo_samples": 1,
         "sample_kl": False,
-        "batch_size": batch_sizes[params["dataset_size"]],
+        # "batch_size": batch_sizes[params["dataset_size"]],
         "record_params": lambda i: i % 1000 == 0,
         "plot_interval": 100,
         "learning_rate": lr, 
         "prior_learning_rate": prior_lr,
+        "delta_nat_f_tilde_lr": delta_nat_f_tilde_lr,
         "use_validation": True,
         # Note that we do not specify this in the high-level parameters!
         "latent_dims": D,
@@ -515,7 +531,7 @@ def expand_pendulum_control_parameters(params):
         inf_params["decnet_architecture"] = decnet_architecture
     inf_params["recnet_architecture"] = architecture
 
-    lr, prior_lr = get_lr(params, max_iters)
+    lr, prior_lr, delta_nat_f_tilde_lr = get_lr(params, max_iters)
 
     extended_params = {
         "project_name": params.get("project_name"),
@@ -524,7 +540,7 @@ def expand_pendulum_control_parameters(params):
         # We're just doing model learning since we're lazy
         "run_type": "model_learning",
         "dataset_params": {
-            "seed": params.get("seed"),
+            "seed": jr.PRNGKey(params.get("jax_seed")),
             # "num_trials": train_trials[params["dataset_size"]],
             "num_timesteps": num_timesteps,
             # "emission_cov": emission_noises[params["snr"]],
@@ -547,6 +563,7 @@ def expand_pendulum_control_parameters(params):
         "mask_type": "potential" if params["inference_method"] == "svae" else "data",
         "learning_rate": lr, 
         "prior_learning_rate": prior_lr,
+        "delta_nat_f_tilde_lr": delta_nat_f_tilde_lr,
         "use_validation": True,
         # Note that we do not specify this in the high-level parameters!
         "latent_dims": D,
@@ -635,7 +652,7 @@ def expand_pendulum_parameters(params):
         "decnet_class": decnet_class,
         "decnet_architecture": decnet_architecture,
         "dataset_params": {
-            "seed": params.get("seed"),
+            "seed": jr.PRNGKey(params.get("jax_seed")),
             "train_trials": train_trials[params["dataset_size"]],
             "val_trials": val_trials[params["dataset_size"]],
             "emission_cov": noise_scales[params["snr"]]

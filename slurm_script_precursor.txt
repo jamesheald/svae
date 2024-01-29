@@ -1,0 +1,42 @@
+step 1) create a new conda environment
+
+step 2) activate environment and install packages via pip (maybe do python -m before each pip install to install with conda? - see note on that below)
+
+        pip install flax==0.7.4
+        pip install einops
+        pip install gym
+        pip install optax==0.1.7
+        pip install chex==0.1.8
+        pip install orbax
+        pip install orbax-checkpoint==0.2.3
+        pip install imageio
+        pip install matplotlib
+        pip install tensorflow[and-cuda]
+        pip install git+https://github.com/P-Schumacher/warmup.git
+        pip install mujoco
+        pip install mujoco-py
+        pip install Cython==0.29.33
+        pip install patchelf
+        pip install sparsejac
+
+        pip install --upgrade pip
+        pip install --upgrade "jax[cuda11_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html # can also specify version eg "jax[cuda11_pip]==0.4.16" - useful in case of version-specific errors e.g. https://github.com/google-research/multinerf/issues/139
+
+step 3) install packages via conda
+
+        conda install -c conda-forge glew
+        conda install -c conda-forge mesalib
+        conda install -c menpo glfw3
+        conda install -c menpo osmesa
+        conda install -c anaconda patchelf
+        conda install -c conda-forge libgcrypt
+
+        export CPATH=$/nfs/nhome/live/jheald/.conda/envs/hDiffHPC/include
+
+    # may need to install libgcrypt11 if error message arises
+    # https://github.com/openai/mujoco-py/issues/323#issuecomment-618365770 [sudo apt-get install -y rpm2cpio (https://zoomadmin.com/HowToInstall/UbuntuPackage/rpm2cpio)]
+
+    # conda list # see conda packages (as opposed ot pip packages)
+    # python -m pip install <package> # (install package with conda as opposed to pip)
+
+    # needed to add conda deactivate to slurm script as per here (https://github.com/conda/conda/issues/9392)

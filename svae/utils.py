@@ -16,12 +16,30 @@ from flax.training.early_stopping import EarlyStopping
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, MaxAbsScaler, RobustScaler
 
+from sklearn import linear_model
+
 def plot_img_grid(recon):
     plt.figure(figsize=(8,8))
     # Show the sequence as a block of images
     stacked = recon.reshape(10, 24 * 10, 24)
     imgrid = stacked.swapaxes(0, 1).reshape(24 * 10, 24 * 10)
     plt.imshow(imgrid, vmin=0, vmax=1)
+
+def R2_inferred_vs_actual_states(posterior_means, true_states):
+
+    # import numpy as np
+    # from sklearn.linear_model import LinearRegression
+    # X = np.random.rand(100, 3)
+    # y = X @ np.random.rand(3, 3)  + 3
+    # reg = LinearRegression().fit(X, y)
+    # print(reg.predict(X) - (X @ reg.coef_.T + reg.intercept_))
+
+    reg = linear_model.LinearRegression()
+    reg.fit(posterior_means, true_states) # reg.predict(posterior_means) = posterior_means @ reg.coef_.T + reg.intercept_
+    R2 = reg.score(posterior_means, true_states)
+    predicted_states = reg.predict(posterior_means)
+
+    return R2, predicted_states
 
 # @title Math helpers
 def softplus(x):
@@ -47,12 +65,31 @@ def sample_from_MVN(mu, Sigma, key):
 
     return x
 
-def construct_covariance_matrix(x, dim):
+def construct_covariance_matrix(x, dim, eps=1e-4):
 
     # create lower triangular matrix
     L = np.zeros((dim, dim))
     L = L.at[np.tril_indices(dim)].set(x)
+
+    # construct covariance matrix via its cholesky decomposition
     Sigma = L @ L.T
+
+    # add scaled identity matrix for stability
+    Sigma += eps * np.eye(dim)
+
+    return Sigma
+
+def construct_precision_matrix(x, dim, eps=.0):
+
+    # create lower triangular matrix
+    L = np.zeros((dim, dim))
+    L = L.at[np.tril_indices(dim)].set(x)
+
+    # construct covariance matrix via its cholesky decomposition
+    Sigma = L @ L.T
+
+    # add scaled identity matrix for stability
+    Sigma += eps * np.eye(dim)
 
     return Sigma
 
@@ -80,7 +117,8 @@ def scale_singular_values(A):
 
 def truncate_singular_values(A):
     eps = 1e-3
-    u, s, vt = svd(A)
+    # u, s, vt = svd(A) NotImplementedError: Singular value decomposition JVP not implemented for full matrices
+    u, s, vt = np.linalg.svd(A) 
     return u @ np.diag(np.clip(s, eps, 1)) @ vt
 
 def random_rotation(seed, n, theta=None):
@@ -116,7 +154,7 @@ def scale_matrix_by_norm(M):
 
 #     return scale_matrix_by_norm(A)
 
-def construct_dynamics_matrix(u, v, s, dim, eps = 1e-6):
+def construct_dynamics_matrix(u, v, s, dim, eps = 1e-3):
 
     U, _ = np.linalg.qr(u.reshape((dim, dim)))
     V, _ = np.linalg.qr(v.reshape((dim, dim)))
@@ -198,7 +236,9 @@ def get_train_state(train_params, all_optimisers=[], all_params=[]):
     else:
         mngr = CheckpointManager(ckpt_metrics_dir,  
                                  {'recognition_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
-                                  'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
+                                  'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                                  'delta_q_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                                  'delta_f_tilde_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
                                  options)
 
     if train_params['reload_state']:
@@ -209,7 +249,7 @@ def get_train_state(train_params, all_optimisers=[], all_params=[]):
         if train_params["inference_method"] != "rpm":
             states = [items['recognition_model_state'],  items['decoder_model_state'],  items['prior_model_state']]
         else:
-            states = [items['recognition_model_state'],  items['prior_model_state']]
+            states = [items['recognition_model_state'],  items['prior_model_state'], items['delta_q_state'],  items['delta_f_tilde_state']]
         # items['metrics']
 
         # change ckpt_metrics_dir to train_params["save_dir"]
