@@ -40,7 +40,13 @@ class LDSSVAEPosterior(SVAEPrior):
             "A_v": jr.normal(key_A_v, (D, D)),
             "A_s": jr.normal(key_A_s, (D,)),
             # "A": truncate_singular_values(jr.normal(key_A_u, (D, D))/np.sqrt(D)),
+            "Abar_u": np.zeros((D, D)),
+            "Abar_v": np.zeros((D, D)),
+            "Abar_s": np.zeros((D,)),
+            "v": np.zeros((U,)),
+            "S": np.eye(U),
             "B": np.ones((D, U))/np.sqrt(U),
+            "b": np.zeros(D),
             "Q": np.eye(D),
             "Sigma": np.tile(np.eye(D)[None], (T, 1, 1)),
             "mu": np.zeros((T, D)),
@@ -52,6 +58,8 @@ class LDSSVAEPosterior(SVAEPrior):
         }
         p.update({"A": construct_dynamics_matrix(p["A_u"], p["A_v"], p["A_s"], self.latent_dims)})
         # p.update({"A": truncate_singular_values(p["A"])})
+        p.update({"Abar": construct_dynamics_matrix(p["Abar_u"], p["Abar_v"], p["Abar_s"], self.latent_dims)})
+        p.update({"U": np.linalg.pinv(p['B']) @ (p['Abar'] - p['A'])})
 
         dist = self.dist.infer_from_dynamics_and_potential(p, 
                                     {"mu": p["mu"], "Sigma": p["Sigma"]}, u)

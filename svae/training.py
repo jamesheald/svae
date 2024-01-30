@@ -493,6 +493,8 @@ class Trainer:
             # print("max ells episode", max_ells[0])
             # print("max ells time point", max_ells[1])
 
+            print("policy_loss mean", aux['policy_loss'].mean())
+
             # print("kl_correction mean", aux['kl_correction'].mean())
             # print("log_normaliser_implied mean", aux['log_normaliser_implied'].mean())
             # print("log_normaliser_implied2 mean", aux['log_normaliser_implied2'].mean())
@@ -708,14 +710,16 @@ def svae_loss(key, model, data_batch, target_batch, u_batch, model_params, goal_
     # K = model.prior.get_optimal_feedback_gain(p["A"], p["B"], Q_lqr, R_lqr)
     # optimal_prior_params = model.prior.get_marginals_under_optimal_control(prior_params, x_goal, u_eq, K)
 
-    prior_params_batch = vmap(model.prior.get_constrained_params, in_axes=(None,0))(model_params["prior_params"], u_batch)
+    # prior_params_batch = vmap(model.prior.get_constrained_params, in_axes=(None,0))(model_params["prior_params"], u_batch)
+
+    prior_marg_params = model.prior.get_constrained_params(model_params["prior_params"], None)
 
     # if using nonparametric delta_f_tilde
     # delta_f_tilde = model.delta_nat_f_tilde.apply(model_params["delta_f_tilde_params"])
 
     result = vmap(partial(model.compute_objective, **train_params), 
                   in_axes=(0, 0, 0, 0, 0, None, None, None))\
-                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, np.arange(batch_size), prior_params_batch, RPM_batch, model_params)
+                  (jr.split(key, batch_size), data_batch, target_batch, u_batch, np.arange(batch_size), prior_marg_params, RPM_batch, model_params)
     # Need to compute sufficient stats if we want the natural gradient update
     if (train_params.get("use_natural_grad")):
         post_params = result["posterior_params"]

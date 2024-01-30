@@ -105,34 +105,47 @@ class LinearGaussianChain:
 
     # Only supports 0d and 1d sample shapes
     # Does not support sampling with batched object
-    def sample(self, u, seed, sample_shape=()):
+    def sample(self, p, u, seed, sample_shape=()):
 
-        @partial(np.vectorize, signature="(n),(t,d,d),(t,d),(t,d,d)->(t,d)")
-        def sample_single(key, A, b, Q):
+        T = self._dynamics_matrix.shape[0]
+        z = np.zeros((T, self._dynamics_matrix.shape[-1]))
+        u = np.zeros((T, u.shape[-1]))
+        for t in range(T):
+            z_seed, u_seed, seed = jr.split(seed, 3)
+            if t==0:
+                z = z.at[t, :].set(MVN(loc=p['m1'], covariance_matrix=p['Q1']).sample(seed=z_seed))
+            else:
+                z = z.at[t, :].set(MVN(loc=(p['A'] @ z[t-1, :] + p['B'] @ u[t-1, :]), covariance_matrix=p['Q']).sample(seed=z_seed))
+            u = u.at[t, :].set(MVN(loc=(p['U'] @ z[t, :] + p['v']), covariance_matrix=p['S']).sample(seed=u_seed))
 
-            biases = MVN(loc=b, covariance_matrix=Q).sample(seed=key) # biases = MVN(loc=Bu, covariance_matrix=Q).sample(seed=key)
-            init_elems = (A, biases)
+        return z, u
 
-            @vmap
-            def assoc_op(elem1, elem2):
-                A1, b1 = elem1
-                A2, b2 = elem2
-                return A2 @ A1, A2 @ b1 + b2
+        # @partial(np.vectorize, signature="(n),(t,d,d),(t,d),(t,d,d)->(t,d)")
+        # def sample_single(key, A, b, Q):
 
-            _, sample = lax.associative_scan(assoc_op, init_elems)
-            return sample
+        #     biases = MVN(loc=b, covariance_matrix=Q).sample(seed=key) # biases = MVN(loc=Bu, covariance_matrix=Q).sample(seed=key)
+        #     init_elems = (A, biases)
 
-        if (len(sample_shape) == 0):
-            return sample_single(seed, self._dynamics_matrix,
-                                 self._dynamics_bias,
-                                 self._noise_covariance)
-        elif (len(sample_shape) == 1):
-            return sample_single(jr.split(seed, sample_shape[0]),
-                                 self._dynamics_matrix[None],
-                                 self._dynamics_bias[None],
-                                 self._noise_covariance[None])
-        else:
-            raise Exception("More than one sample dimensions are not supported!")
+        #     @vmap
+        #     def assoc_op(elem1, elem2):
+        #         A1, b1 = elem1
+        #         A2, b2 = elem2
+        #         return A2 @ A1, A2 @ b1 + b2
+
+        #     _, sample = lax.associative_scan(assoc_op, init_elems)
+        #     return sample
+
+        # if (len(sample_shape) == 0):
+        #     return sample_single(seed, self._dynamics_matrix,
+        #                          self._dynamics_bias,
+        #                          self._noise_covariance)
+        # elif (len(sample_shape) == 1):
+        #     return sample_single(jr.split(seed, sample_shape[0]),
+        #                          self._dynamics_matrix[None],
+        #                          self._dynamics_bias[None],
+        #                          self._noise_covariance[None])
+        # else:
+        #     raise Exception("More than one sample dimensions are not supported!")
 
     def entropy(self):
         """
@@ -251,6 +264,8 @@ class LinearGaussianSSM(tfd.Distribution):
         C = np.eye(dim)
         d = np.zeros(dim)
 
+        # params = make_lgssm_params(p["m1"], p["Q1"], p["A"], p["Q"], C, Sigmas,
+        #                            dynamics_input_weights=p["B"], dynamics_bias=p['b'], emissions_bias=d)
         params = make_lgssm_params(p["m1"], p["Q1"], p["A"], p["Q"], C, Sigmas,
                                    dynamics_input_weights=p["B"], emissions_bias=d)
         smoothed = lgssm_smoother(params, mus, u)._asdict()

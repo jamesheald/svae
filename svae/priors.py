@@ -38,7 +38,7 @@ class SVAEPrior:
         pass
     
     def sample(self, params, u, shape, key):
-        samples = self.distribution(self.get_constrained_params(params, u)).sample(u=u, sample_shape=shape, seed=key)
+        samples = self.distribution(self.get_constrained_params(params, u)).sample(params, u=u, sample_shape=shape, seed=key)
         return samples
 
     def get_constrained_params(self, params, u):
@@ -84,20 +84,34 @@ class LinearGaussianChainPrior(SVAEPrior):
 
     def get_constrained_params(self, params, u):
         p = copy.deepcopy(params)
-        tridiag = dynamics_to_tridiag(params, self.seq_len, self.latent_dims)
-        p.update(tridiag)
-        b = u[:-1] @ p["B"].T
-        dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
-                                         p["A"], b, p["Q"], self.seq_len)
-        p.update({
-            "As": dist._dynamics_matrix,
-            "bs": dist._dynamics_bias,
-            "Qs": dist._noise_covariance,
-            "Ex": dist.expected_states,
-            "Sigma": dist.covariance,
-            "ExxT": dist.expected_states_squared,
-            "ExnxT": dist.expected_states_next_states
-        })
+        if u is None:
+            # tridiag = dynamics_to_tridiag(params, self.seq_len, self.latent_dims)
+            # p.update(tridiag)
+            # A = p["A"] + p["B"] @ p["U"]
+            A = p["Abar"]
+            b = np.tile(p["B"] @ p["v"], (self.seq_len - 1, 1))
+            Q = p["Q"] + p["B"] @ p["S"] @ p["B"].T
+            # b = u[:-1] @ p["B"].T
+            dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
+                                             A, b, Q, self.seq_len)
+            p.update({
+                "Ex": dist.expected_states,
+                "Sigma": dist.covariance,
+            })
+        else:
+            tridiag = dynamics_to_tridiag(params, self.seq_len, self.latent_dims)
+            p.update(tridiag)
+            dist = LinearGaussianChain.from_stationary_dynamics(p["m1"], p["Q1"], 
+                                             p["A"], u[:-1] @ p["B"].T, p["Q"], self.seq_len)
+            p.update({
+                "As": dist._dynamics_matrix,
+                "bs": dist._dynamics_bias,
+                "Qs": dist._noise_covariance,
+                "Ex": dist.expected_states,
+                "Sigma": dist.covariance,
+                "ExxT": dist.expected_states_squared,
+                "ExnxT": dist.expected_states_next_states
+            })
 
         # # natural parameters of prior marginals
         # prior_J = psd_solve(p["Sigma"], np.eye(self.latent_dims)[None])
@@ -200,7 +214,7 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
 
     def init(self, key):
         D, U = self.latent_dims, self.input_dims
-        key_A_u, key_A_v, key_A_s, key_B, key_C, key_d, key_R, key_J_aux, key_h_aux = jr.split(key, 9)
+        key_A_u, key_A_v, key_A_s, key_U_u, key_U_v, key_U_s, key_B, key_U, key_v, key_C, key_d, key_R, key_J_aux, key_h_aux = jr.split(key, 14)
         # Equivalent to the unit matrix
         # eps = min(self.init_dynamics_noise_scale / 100, 1e-4)
         # Q_flat = np.concatenate([np.ones(D) 
@@ -210,6 +224,7 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
         Q_flat = I[np.tril_indices(D)]
         Q1_flat = I[np.tril_indices(D)]
         R_flat = I[np.tril_indices(D)]
+        S_flat = I[np.tril_indices(U)]
         # A = random_rotation(key_A_u, D, theta=np.pi/20)
         # U, S, V = np.linalg.svd(A) # A = U @ np.diag(S) @ V
         # construct_dynamics_matrix((U @ np.triu(np.ones((D, D)))).ravel(), (V.T @ np.triu(np.ones((D, D)))).ravel(), np.log(np.divide(S, 1.-S)), D)
@@ -220,12 +235,18 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
             "A_u": jr.normal(key_A_u, (D, D)),
             "A_v": jr.normal(key_A_v, (D, D)),
             "A_s": jr.normal(key_A_s, (D,)),
+            "Abar_u": jr.normal(key_U_u, (D, D)),
+            "Abar_v": jr.normal(key_U_v, (D, D)),
+            "Abar_s": jr.normal(key_U_s, (D,)),
             "Q1": Q1_flat,
             # "Q1": np.zeros(D),
             # "Q1": np.eye(D),
             "B": jr.normal(key_B, (D, U))/np.sqrt(U),
+            "b": np.zeros(D),
+            "v": jr.normal(key_v, (U,)),
             # "Q": np.eye(D),
             "Q": Q_flat,
+            "S": S_flat,
             "R": R_flat,
             # "Q": np.zeros(D),
             # "Q": np.eye(D),
@@ -247,6 +268,12 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
             "A": construct_dynamics_matrix(params["A_u"], params["A_v"], params["A_s"], self.latent_dims),
             # "A": params["A"],
             "B": scale_matrix_by_norm(params["B"]),
+            "b": params["b"],
+            "Abar": construct_dynamics_matrix(params["Abar_u"], params["Abar_v"], params["Abar_s"], self.latent_dims),
+            # "U": construct_dynamics_matrix(params["U_u"], params["U_v"], params["U_s"], params["v"].size, self.latent_dims),
+            "S": construct_covariance_matrix(params["S"], params["v"].size),
+            "v": scale_matrix_by_norm(params["v"]),
+            # "Q1": params["Q1"],
             # "Q1": params["Q1"],
             # "Q": params["Q"],
             # "B":params["B"],
@@ -264,4 +291,7 @@ class LieParameterizedLinearGaussianChainPrior(LinearGaussianChainPrior):
     def get_constrained_params(self, params, u):
         D = self.latent_dims
         p = self.get_dynamics_params(params)
+        p.update({
+            "U": np.linalg.pinv(p['B']) @ (p['Abar'] - p['A']),
+        })
         return super().get_constrained_params(p, u)

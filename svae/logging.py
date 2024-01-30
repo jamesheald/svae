@@ -252,49 +252,53 @@ def log_to_wandb(trainer, loss_out, data_dict, grads):
 
     if p["inference_method"] == "rpm" or p["inference_method"] == "lds":
 
-        # https://docs.wandb.ai/guides/track/log/plots
-        num_trials = data_dict["train_states"].shape[0]
-        num_timesteps = data_dict["train_states"].shape[1]
-        latent_dims = data_dict["train_states"].shape[2]
-        train_states_batch = train_states_batch.reshape(num_trials, num_timesteps, -1)
-        predicted_states = predicted_states.reshape(num_trials, num_timesteps, -1)
+        # # https://docs.wandb.ai/guides/track/log/plots
+        # num_trials = data_dict["train_states"].shape[0]
+        # num_timesteps = data_dict["train_states"].shape[1]
+        # latent_dims = data_dict["train_states"].shape[2]
+        # train_states_batch = train_states_batch.reshape(num_trials, num_timesteps, -1)
+        # predicted_states = predicted_states.reshape(num_trials, num_timesteps, -1)
 
-        # https://seaborn.pydata.org/tutorial/color_palettes.html
-        n_cols = min(int(np.floor(np.sqrt(num_trials))), 2)
-        n_rows = n_cols
-        palette = sns.color_palette(None, latent_dims)
-        cnt = 1
-        f1 = plt.figure(1)
-        for _ in range(n_rows):
-            for _ in range(n_cols):
-                plt.subplot(n_rows, n_cols, cnt)
-                for d in range(latent_dims):
-                    # plt.plot(train_states_batch[cnt], 'g--', predicted_states[cnt], 'r--')
-                    # if cnt == 1:
-                    #     plt.legend(['true states', 'inferred states'])
-                    plt.plot(train_states_batch[cnt,:,d],'--', c=palette[d])
-                    plt.plot(predicted_states[cnt,:,d], c=palette[d])
-                cnt += 1
+        # # https://seaborn.pydata.org/tutorial/color_palettes.html
+        # n_cols = min(int(np.floor(np.sqrt(num_trials))), 2)
+        # n_rows = n_cols
+        # palette = sns.color_palette(None, latent_dims)
+        # cnt = 1
+        # f1 = plt.figure(1)
+        # for _ in range(n_rows):
+        #     for _ in range(n_cols):
+        #         plt.subplot(n_rows, n_cols, cnt)
+        #         for d in range(latent_dims):
+        #             # plt.plot(train_states_batch[cnt], 'g--', predicted_states[cnt], 'r--')
+        #             # if cnt == 1:
+        #             #     plt.legend(['true states', 'inferred states'])
+        #             plt.plot(train_states_batch[cnt,:,d],'--', c=palette[d])
+        #             plt.plot(predicted_states[cnt,:,d], c=palette[d])
+        #         cnt += 1
     
+        # to_log = { "ELBO": elbo, "KL_qp": kl_qp, "KL_qf": kl_qf, "log_Gamma": log_Gamma, "R2 state": R2_train_states, # "Prior graident norm": prior_grads_norm,
+        #            "R2 state 1": aux['R2_train_states' + '_dim' + str(0)], "R2 state 2": aux['R2_train_states' + '_dim' + str(1)], "R2 state 3": aux['R2_train_states' + '_dim' + str(2)],
+        #           "Learning rate": lr, "Prior learning rate": prior_lr, "true vs. inferred (q) states": f1}
+
         to_log = { "ELBO": elbo, "KL_qp": kl_qp, "KL_qf": kl_qf, "log_Gamma": log_Gamma, "R2 state": R2_train_states, # "Prior graident norm": prior_grads_norm,
                    "R2 state 1": aux['R2_train_states' + '_dim' + str(0)], "R2 state 2": aux['R2_train_states' + '_dim' + str(1)], "R2 state 3": aux['R2_train_states' + '_dim' + str(2)],
-                  "Learning rate": lr, "Prior learning rate": prior_lr, "true vs. inferred (q) states": f1}
+                  "Learning rate": lr, "Prior learning rate": prior_lr}
 
-        f2 = plt.figure(2)
-        predicted_states_rpm = predicted_states_rpm.reshape(num_trials, num_timesteps, -1)
-        cnt = 1
-        for _ in range(n_rows):
-            for _ in range(n_cols):
-                plt.subplot(n_rows, n_cols, cnt)
-                for d in range(latent_dims):
-                    # plt.plot(train_states_batch[cnt], 'g--', predicted_states[cnt], 'r--')
-                    # if cnt == 1:
-                    #     plt.legend(['true states', 'inferred states'])
-                    plt.plot(train_states_batch[cnt,:,d],'--', c=palette[d])
-                    plt.plot(predicted_states_rpm[cnt,:,d], c=palette[d])
-                cnt += 1
+        # f2 = plt.figure(2)
+        # predicted_states_rpm = predicted_states_rpm.reshape(num_trials, num_timesteps, -1)
+        # cnt = 1
+        # for _ in range(n_rows):
+        #     for _ in range(n_cols):
+        #         plt.subplot(n_rows, n_cols, cnt)
+        #         for d in range(latent_dims):
+        #             # plt.plot(train_states_batch[cnt], 'g--', predicted_states[cnt], 'r--')
+        #             # if cnt == 1:
+        #             #     plt.legend(['true states', 'inferred states'])
+        #             plt.plot(train_states_batch[cnt,:,d],'--', c=palette[d])
+        #             plt.plot(predicted_states_rpm[cnt,:,d], c=palette[d])
+        #         cnt += 1
 
-        to_log['true vs. inferred (rpm) states'] = f2
+        # to_log['true vs. inferred (rpm) states'] = f2
 
     else:
         to_log = { "ELBO": elbo, "KL": kl, "Likelihood": ell, # "Prior graident norm": prior_grads_norm,

@@ -63,11 +63,11 @@ class RPM:
     #         return np.mean(posterior.log_prob(samples) - prior.log_prob(samples))
 
     def elbo(self, key, data, target, # Added the new target parameter 
-             u, batch_id, prior_params_batch, RPM_batch, model_params, sample_kl=False, **params):
+             u, batch_id, prior_marg_params, RPM_batch, model_params, sample_kl=False, **params):
         # rec_params = model_params["rec_params"]
-        # prior_params = self.prior.get_constrained_params(model_params["prior_params"], u)
+        current_prior_params = self.prior.get_constrained_params(model_params["prior_params"], u)
 
-        current_prior_params = tree_map(lambda x: x[batch_id], prior_params_batch)
+        # current_prior_params = tree_map(lambda x: x[batch_id], prior_params_batch)
 
         potential = {}
         # potential['J'] = RPM_batch["J"][batch_id] - MM_prior["J"]
@@ -188,10 +188,10 @@ class RPM:
         # use all datapoints
         # normalised_auxillary_J = posterior_J[None] + RPM_batch["J"] - MM_prior["J"][None]
         # normalised_auxillary_h = posterior_h[None] + RPM_batch["h"] - MM_prior["h"][None]
-        prior_J = vmap(vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None)), in_axes=(0, None))(prior_params_batch["Sigma"], np.eye(self.prior.latent_dims))
-        prior_h = np.einsum("hijk,hik->hij", prior_J, prior_params_batch["Ex"])
-        normalised_auxillary_J = prior_J + RPM_batch["J"] - prior_J[batch_id][None] # i think this is equal to RPM_batch["J"] as prior_J is independnet of u
-        normalised_auxillary_h = prior_h + RPM_batch["h"] - prior_h[batch_id][None]
+        prior_J = vmap(lambda S, I: psd_solve(S, I), in_axes=(0, None))(prior_marg_params["Sigma"], np.eye(self.prior.latent_dims))
+        prior_h = np.einsum("ijk,ik->ij", prior_J, prior_marg_params["Ex"])
+        normalised_auxillary_J = RPM_batch["J"]
+        normalised_auxillary_h = RPM_batch["h"]
         if params['use_ansatz']:
 
             normalised_auxillary_J += posterior_J[None]
@@ -210,7 +210,7 @@ class RPM:
             normalised_auxillary_J += current_prior_params['J_aux'][batch_id][None]
             normalised_auxillary_h += current_prior_params['h_aux'][batch_id][None]
 
-        kl_qp, kl_qf = self.kl_terms(params, posterior, current_prior_params, u, normalised_auxillary_J[batch_id], normalised_auxillary_h[batch_id], delta_q)
+        # kl_qp, kl_qf = self.kl_terms(params, posterior, current_prior_params, u, normalised_auxillary_J[batch_id], normalised_auxillary_h[batch_id], delta_q)
         
         # expected log auxiliary factors < log \tilde{f} >
         # Murphy section 2.3.2.5
@@ -252,7 +252,7 @@ class RPM:
         # use (action conditioned) prior
         if params['use_prior_for_F']:
 
-            RPM_log_normaliser = vmap(vmap(self.log_normaliser))(prior_J + RPM_batch["J"], prior_h + RPM_batch["h"])
+            RPM_log_normaliser = vmap(vmap(self.log_normaliser))(prior_J[None] + RPM_batch["J"], prior_h[None] + RPM_batch["h"])
 
         else:
 
@@ -288,6 +288,8 @@ class RPM:
         kl_qp = self.kl_qp_natural_parameters(posterior_precision, posterior_precision @ posterior.expected_states.reshape(-1), prior_precision, prior_precision @ current_prior_params["Ex"].reshape(-1))
         kl_qf = self.kl_qp_natural_parameters(posterior_precision, posterior_precision @ posterior.expected_states.reshape(-1), block_diag(*normalised_auxillary_J[batch_id]), normalised_auxillary_h[batch_id].reshape(-1))
 
+        policy_loss = vmap(self.policy_loss, in_axes=(None,0,0,0))(current_prior_params, u, posterior.expected_states, posterior.smoothed_covariances).sum()
+
         # batch_size = RPM_log_normaliser.shape[0]
         # n_timepoints = RPM_log_normaliser.shape[1]
         # T_log_N = n_timepoints * np.log(batch_size)
@@ -297,9 +299,10 @@ class RPM:
         # kl_correction /= data.size
         log_gamma /= data.size
         # T_log_N /= data.size
+        policy_loss /= data.size
 
         # free_energy = - (kl_qp + kl_correction) - (kl_qf + kl_correction) + log_gamma + T_log_N
-        free_energy = - kl_qp - kl_qf + log_gamma # + T_log_N - T_log_N
+        free_energy = policy_loss - kl_qp - kl_qf + log_gamma # + T_log_N - T_log_N
 
         # kl /= target.size
         # ell /= target.size
@@ -322,6 +325,7 @@ class RPM:
             # "E_log_aux3": E_log_aux3.sum(),
             "log_Gamma": log_gamma,
             # "log_Gamma2": log_Gamma2.sum(),
+            'policy_loss': policy_loss,
             "posterior_params": posterior_params,
             "posterior_means": posterior.expected_states,
             "rpm_means": rpm_mu
@@ -533,3 +537,18 @@ class RPMLDS(RPM):
         log_normaliser_p = self.log_normaliser(J_p, h_p)
 
         return trm + log_normaliser_p - log_normaliser_q
+
+    def policy_loss(self, params, u, mu, Sigma, diagonal_boost = 1e-9):
+
+        U = params['U']
+        v = params['v']
+        S = params['S']
+        
+        u_dim = u.size
+        J = psd_solve(S, np.eye(u_dim))
+        L = np.linalg.cholesky(J + diagonal_boost * np.eye(u_dim))
+        half_log_det_J = np.log(np.diagonal(L)).sum()
+
+        loss = 0.5 * (-u_dim * np.log(2 * np.pi) + 2 * half_log_det_J - (u - v) @ J @ (u - v) + 2 * (u - v) @ J @ U @ mu - (U @ mu).T @ J @ (U @ mu) - ((U.T @ J @ U) * Sigma).sum())
+
+        return loss

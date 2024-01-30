@@ -23,14 +23,14 @@ class LDS(LinearGaussianChainPrior):
 
     # Takes unconstrained params
     def sample(self, params, u, shape, key):
-        latents = self.base.sample(params, u, shape, key)
+        latents, controls = self.base.sample(params, u, shape, key)
         sample_shape = latents.shape[:-1]
         key, _ = jr.split(key)
         C, d, R = params["C"], params["d"], params["R"]
         obs_noise = tfd.MultivariateNormalFullCovariance(loc=d, covariance_matrix=R)\
             .sample(sample_shape=sample_shape, seed=key)
         obs = np.einsum("ij,...tj->...ti", C, latents) + obs_noise
-        return latents, obs
+        return latents, obs, controls
 
     # Should work with any batch dimension
     def log_prob(self, params, u, states, data):
@@ -88,7 +88,7 @@ def sample_lds_dataset(run_params):
     dynamics_cov = d["dynamics_cov"]
     num_timesteps = d["num_timesteps"]
     num_trials = d["num_trials"]
-    seed_m1, seed_C, seed_d, seed_A, seed_B, seed_u, seed_sample = jr.split(seed, 7)
+    seed_m1, seed_C, seed_d, seed_A, seed_Abar, seed_B, seed_u, seed_U, seed_v, seed_S, seed_sample = jr.split(seed, 11)
 
     R = emission_cov * np.eye(emission_dims)
     Q = dynamics_cov * np.eye(latent_dims)
@@ -97,6 +97,8 @@ def sample_lds_dataset(run_params):
     d = jr.normal(seed_d, shape=(emission_dims,))
     # d = np.zeros(emission_dims,)
     B = jr.normal(seed_B, shape=(latent_dims, input_dims))
+    v = jr.normal(seed_v, shape=(input_dims,))
+    S = dynamics_cov * np.eye(input_dims)
 
     # Here we let Q1 = Q
     lds = LDS(latent_dims, input_dims, num_timesteps)
@@ -108,16 +110,22 @@ def sample_lds_dataset(run_params):
             # "Q1": 0.01 * np.eye(latent_dims),
             "Q": Q,
             "A": random_rotation(seed_A, latent_dims, theta=np.pi/20),
+            "Abar": random_rotation(seed_Abar, latent_dims, theta=np.pi/20),
             "B": B,
+            'b': np.zeros(latent_dims,),
             "R": R,
             "C": C,
             "d": d,
+            "S": S,
+            "v": v,
         }
+
+    params.update({"U": np.linalg.pinv(params['B']) @ (params['Abar'] - params['A'])})
 
     # sinusoidal controls with random phase
     u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
     u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
-    u = u.transpose(0,2,1) * 0.# num_trials x num_timesteps x input_dims
+    u = u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
 
     # constrained = lds.get_constrained_params
 
@@ -125,7 +133,7 @@ def sample_lds_dataset(run_params):
                                 # "ExxT": constrained["ExxT"], 
                                 # "ExnxT": constrained["ExnxT"] } # JHmod
 
-    states, data = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(u, jr.split(seed_sample, num_trials))
+    states, data, u = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(u, jr.split(seed_sample, num_trials))
     
     mll, posterior_mean = vmap(lds.marginal_log_likelihood, in_axes=(None, 0, 0))(params, u, data)
     mll = np.sum(mll) / data.size
@@ -146,12 +154,12 @@ def sample_lds_dataset(run_params):
     # sinusoidal controls with random phase
     u_keys = jr.split(seed_u, num_trials * input_dims).reshape(num_trials, input_dims, 2)
     val_u = vmap(vmap(lambda T, key: np.cos(np.linspace(0, 1, T) * 2 * np.pi + jr.uniform(key) * 2 * np.pi), in_axes = (None,0)), in_axes = (None,0))(num_timesteps, u_keys)
-    val_u = val_u.transpose(0,2,1) * 0.# num_trials x num_timesteps x input_dims
+    val_u = val_u.transpose(0,2,1) # num_trials x num_timesteps x input_dims
 
     # val_states, val_data = lds.sample(params, val_u,
     #                           shape=(num_trials,), 
     #                           key=seed_val)
-    val_states, val_data = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(val_u, jr.split(seed_val, num_trials))
+    val_states, val_data, val_u = vmap(lambda u, key: lds.sample(params, u = u, shape=(), key=key))(val_u, jr.split(seed_val, num_trials))
 
     scaler_obs = get_scaler('standard')
     scaler_states = get_scaler('standard')
@@ -191,6 +199,15 @@ def sample_lds_dataset(run_params):
     data_dict['scaler_u'] = scaler_u
     data_dict['scaled_states'] = scaled_states
 
+    # from matplotlib import pyplot as plt
+    # plt.plot(data_dict["train_states"].mean(axis=0)[:,0],'r')
+    # plt.plot(data_dict["train_states"].mean(axis=0)[:,1],'g')
+    # plt.plot(data_dict["train_states"].mean(axis=0)[:,2],'b')
+    # plt.fill_between(np.arange(100), data_dict["train_states"].mean(axis=0)[:,0]-data_dict["train_states"].std(axis=0)[:,0], data_dict["train_states"].mean(axis=0)[:,0]+data_dict["train_states"].std(axis=0)[:,0],color='r',alpha=0.1)
+    # plt.fill_between(np.arange(100), data_dict["train_states"].mean(axis=0)[:,1]-data_dict["train_states"].std(axis=0)[:,1], data_dict["train_states"].mean(axis=0)[:,1]+data_dict["train_states"].std(axis=0)[:,1],color='g',alpha=0.1)
+    # plt.fill_between(np.arange(100), data_dict["train_states"].mean(axis=0)[:,2]-data_dict["train_states"].std(axis=0)[:,2], data_dict["train_states"].mean(axis=0)[:,2]+data_dict["train_states"].std(axis=0)[:,2],color='b',alpha=0.1)
+    # plt.show()
+    
     return data_dict
 
 def load_pendulum_control_data(run_params):

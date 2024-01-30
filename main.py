@@ -1,7 +1,9 @@
 #determine gradient clipping value by logging gradient norms during training and assessing
 # tensorboard - save loss function, save gifs and rewards on a small number (say 3) of examples
 
+# import os
 # os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+# os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '.5'
 
 # Q and Q currently diagonal
 # delta mu comented out in train and below
