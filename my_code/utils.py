@@ -1,13 +1,10 @@
-# i've decided i don't trust the svae code one bit. for example, they don't seem to know that jax require pure functions where all arguments must be passed to the function. in their inference.py file where they implement parallel kf, 
-# they have numerous non-pure functions.. i've just implemented my own code from scratch and my initial impression is that i seem to be getting better results
-
 from jax import numpy as np
 from jax import random, jit, vmap, value_and_grad
 from jax.lax import scan, dynamic_slice, dynamic_update_slice, stop_gradient
 import flax.linen as nn
 from flax.linen import sigmoid
 from sklearn import linear_model
-import optax as opt
+import optax
 
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
@@ -50,6 +47,15 @@ def scale_y(y):
     
     return scaler_y.fit_transform(y.reshape(-1, y.shape[-1])).reshape(y_shape)
 
+def half_log_det(Sigma, diagonal_boost = 1e-9):
+
+    L = np.linalg.cholesky(Sigma + diagonal_boost * np.eye(Sigma.shape[-1]))
+    half_log_det_Sigma = np.log(np.diagonal(L, axis1 = -2, axis2 = -1)).sum(-1)
+
+    return half_log_det_Sigma
+
+batch_half_log_det = vmap(half_log_det)
+
 def construct_dynamics_matrix(u, v, s, dim, eps = 1e-3):
 
     U, _ = np.linalg.qr(u.reshape((dim, dim)))
@@ -67,19 +73,33 @@ def truncate_singular_values(A, eps = 1e-3):
 
     return u @ np.diag(np.clip(s, eps, 1)) @ vt
 
-def construct_covariance_matrix(x, dim, eps=1e-4):
+def construct_covariance_matrix(x, dim, eps=1e-6):
 
     # create lower triangular matrix
     L = np.zeros((dim, dim))
     L = L.at[np.tril_indices(dim)].set(x)
 
-    # construct covariance matrix via its cholesky decomposition
+    # construct covariance matrix via cholesky decomposition
     Sigma = L @ L.T
 
     # add scaled identity matrix for stability
     Sigma += eps * np.eye(dim)
 
     return Sigma
+
+def construct_precision_matrix(x, dim, eps=1e-6):
+
+    # create lower triangular matrix
+    L = np.zeros((dim, dim))
+    L = L.at[np.tril_indices(dim)].set(x)
+
+    # construct covariance matrix via cholesky decomposition
+    Lambda = L @ L.T
+
+    # add scaled identity matrix for stability
+    Lambda += eps * np.eye(dim)
+
+    return Lambda
 
 def dynamic_slice_add(x, start_indices, slice_sizes, y):
 
@@ -131,7 +151,9 @@ def kl_qp_natural_parameters(J_q, h_q, J_p, h_p):
 
 def expected_log_F(mu_posterior, Sigma_posterior, rpm_mu, rpm_Sigma, key):
 
-    samples = MVN(loc=mu_posterior, covariance_matrix=Sigma_posterior).sample(seed=key).reshape((rpm_mu.shape[1], rpm_mu.shape[2]))
+    MVN.reparameterization_type=tfd.FULLY_REPARAMETERIZED
+
+    samples = MVN(loc=mu_posterior, covariance_matrix=Sigma_posterior).sample(seed=key)
     log_f_prob = vmap(vmap(lambda m, S, x: MVN(loc=m, covariance_matrix=S).log_prob(x), in_axes=(0, 0, 0)), in_axes=(0, 0, None))(rpm_mu, rpm_Sigma, samples)
     batch_size = rpm_mu.shape[0]
     # mx = log_f_prob.max(axis=0)
@@ -267,12 +289,17 @@ def initialise_LDS_params(D, U, key, closed_form_M_Step):
     I = np.sqrt(0.1) * np.eye(D)
 
     params = {}
-    params['m1'] = random.normal(key_m1, (D, ))
-    params['A'] = truncate_singular_values(random.normal(key_A_u, (D, D)) / np.sqrt(D))
+    params['m1'] = np.zeros(D)
+    # params['A'] = truncate_singular_values(random.normal(key_A_u, (D, D)) / np.sqrt(D))
+    params['A'] = np.eye(D)
     # params['A_u'] = random.normal(key_A_u, (D, D))
     # params['A_v'] = random.normal(key_A_v, (D, D))
     # params['A_s'] = random.normal(key_A_s, (D,))
-    params['B'] = random.normal(key_m1, (D, U)) / np.sqrt(U)
+    # if options['learn b']:
+    #     params['B'] = np.zeros((D, U+1))
+    # else:
+    #     params['B'] = np.zeros((D, U)) # random.normal(key_m1, (D, U)) / np.sqrt(U)
+    params['B'] = np.zeros((D, U)) # random.normal(key_m1, (D, U)) / np.sqrt(U)
 
     if closed_form_M_Step:
         params['Q1'] = I
@@ -280,25 +307,26 @@ def initialise_LDS_params(D, U, key, closed_form_M_Step):
     else:
         params['Q1_flat'] = I[np.tril_indices(D)]
         params['Q_flat'] = I[np.tril_indices(D)]
+        # params['Q1_flat'] = np.diag(I)
+        # params['Q_flat'] = np.diag(I)
 
-    params['m1_F'] = random.normal(key_m1_F, (D, ))
-    params['Q1_F_flat'] = I[np.tril_indices(D)]
-    params['A_F'] = truncate_singular_values(random.normal(key_A_F, (D, D)) / np.sqrt(D))
-    params['b_F'] = random.normal(key_b_F, (D,))
-    params['Q_F_flat'] = I[np.tril_indices(D)]
+    # params['m1_F'] = np.zeros(D)
+    # params['Q1_F_flat'] = I[np.tril_indices(D)]
+    # # params['A_F'] = truncate_singular_values(random.normal(key_A_F, (D, D)) / np.sqrt(D))
+    # params['A_F'] = np.eye(D)
+    # params['b_F'] = np.zeros(D)
+    # params['Q_F_flat'] = I[np.tril_indices(D)]
     
-    # # params['Abar_u'] = random.normal(key_Abar_u, (D, D))
-    # # params['Abar_v'] = random.normal(key_Abar_v, (D, D))
-    # # params['Abar_s'] = random.normal(key_Abar_s, (D,))
-    # params['Abar'] = truncate_singular_values(random.normal(key_Abar_u, (D, D)) / np.sqrt(D))
-    params['l'] = random.normal(key_l, (U,))
-    params['S_flat'] = I[np.tril_indices(U)]
+    # # # params['Abar_u'] = random.normal(key_Abar_u, (D, D))
+    # # # params['Abar_v'] = random.normal(key_Abar_v, (D, D))
+    # # # params['Abar_s'] = random.normal(key_Abar_s, (D,))
+    # # params['Abar'] = truncate_singular_values(random.normal(key_Abar_u, (D, D)) / np.sqrt(D))
+    # params['l'] = np.zeros(U)
+    # params['S_flat'] = I[np.tril_indices(U)]
 
     return params
 
-def initialise_LDS_params_M_step(params, opt_states, y, u, key, options, closed_form_M_Step):
-
-    rpm_opt_state, _, _, _ = opt_states
+def initialise_LDS_params_via_M_step(RPM_model, rpm_params, y, u, key, options, closed_form_M_Step):
 
     if options['f_time_dependent']:
 
@@ -308,20 +336,21 @@ def initialise_LDS_params_M_step(params, opt_states, y, u, key, options, closed_
 
         D = y.shape[2]
 
-    RPM = rpm_opt_state.apply_fn(params["rpm_params"], y)
+        RPM = RPM_model.apply(rpm_params, y)
 
+    prior_params = {}
     AB_1 = vmap(vmap(lambda Ex_t, Extm1, u_t: np.hstack((np.outer(Ex_t, Extm1), np.outer(Ex_t, u_t)))))(RPM['mu'][:, 1:, :], RPM['mu'][:, :-1, :], u[:, 1:, :]).sum(axis=(0,1))
     AB_2 = vmap(vmap(lambda Cov_tm1, Ex_tm1, u_t: np.block([[Cov_tm1 + np.outer(Ex_tm1, Ex_tm1), np.outer(Ex_tm1, u_t)],[np.outer(u_t, Ex_tm1), np.outer(u_t, u_t)]])))(RPM['Sigma'][:, :-1, :, :], RPM['mu'][:, :-1, :], u[:, 1:, :]).sum(axis=(0,1))
     AB = np.linalg.solve(AB_2.T, AB_1.T).T # this equals AB_1 @ np.linalg.inv(AB_2)
-    params["prior_params"]["A"] = AB[:, :D]
-    params["prior_params"]["B"] = AB[:, D:]
+    prior_params["A"] = AB[:, :D]
+    prior_params["B"] = AB[:, D:]
     Q = vmap(vmap(lambda Cov_t, Ex_t, Extm1, AB, u_t: Cov_t + np.outer(Ex_t, Ex_t) - AB @ np.vstack((np.outer(Extm1, Ex_t), np.outer(u_t, Ex_t))), in_axes=(0,0,0,None,0)), in_axes=(0,0,0,None,0))(RPM['Sigma'][:, 1:, :, :], RPM['mu'][:, 1:, :], RPM['mu'][:, :-1, :], AB, u[:, 1:, :]).mean(axis=(0,1))
     
-    params["prior_params"]["m1"] = RPM['mu'][:, 0, :].mean(axis=(0,))
-    mu_diff = RPM['mu'][:, 0, :] - params["prior_params"]["m1"]
+    prior_params["m1"] = RPM['mu'][:, 0, :].mean(axis=(0,))
+    mu_diff = RPM['mu'][:, 0, :] - prior_params["m1"]
     Q1 = RPM['Sigma'][:, 0, :, :].mean(axis=(0,)) + np.einsum("jk,jl->jkl", mu_diff, mu_diff).mean(axis = 0)
 
-    params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
+    prior_params["A"] = truncate_singular_values(prior_params["A"])
 
     Q = (Q + Q.T)/2
     Q += np.eye(D) * 1e-4
@@ -330,31 +359,35 @@ def initialise_LDS_params_M_step(params, opt_states, y, u, key, options, closed_
 
     if closed_form_M_Step:
 
-        params["prior_params"]["Q"] = Q
-        params["prior_params"]["Q1"] = Q1
+        prior_params["Q"] = Q
+        prior_params["Q1"] = Q1
 
     else:
 
-        params["prior_params"]["Q_flat"] = np.linalg.cholesky(Q)[np.tril_indices(D)]
-        params["prior_params"]["Q1_flat"] = np.linalg.cholesky(Q1)[np.tril_indices(D)]
+        prior_params["Q_flat"] = np.linalg.cholesky(Q)[np.tril_indices(D)]
+        prior_params["Q1_flat"] = np.linalg.cholesky(Q1)[np.tril_indices(D)]
 
     key_A_u, key_A_v, key_A_s, key_Abar_u, key_Abar_v, key_Abar_s, key_m1, key_B, key_l, key_A_F, key_b_F, key_m1_F  = random.split(key, 12)
     I = np.sqrt(0.1) * np.eye(D)
-    params["prior_params"]['m1_F'] = random.normal(key_m1_F, (D, ))
-    params["prior_params"]['Q1_F_flat'] = I[np.tril_indices(D)]
-    params["prior_params"]['A_F'] = truncate_singular_values(random.normal(key_A_F, (D, D)) / np.sqrt(D))
-    params["prior_params"]['b_F'] = random.normal(key_b_F, (D,))
-    params["prior_params"]['Q_F_flat'] = I[np.tril_indices(D)]
+    prior_params['m1_F'] = np.zeros(D)
+    prior_params['Q1_F_flat'] = I[np.tril_indices(D)]
+    prior_params['A_F'] = truncate_singular_values(random.normal(key_A_F, (D, D)) / np.sqrt(D))
+    # prior_params['A_F'] = np.eye(D) * 0.99
+    prior_params['b_F'] = np.zeros(D)
+    prior_params['Q_F_flat'] = I[np.tril_indices(D)]
 
-    return params
+    return prior_params
 
-def get_constrained_prior_params(params, D, U):
+def get_constrained_prior_params(params, U, eps=0.):
 
     params = deepcopy(params)
 
+    D = params['m1'].size
     params['Q1'] = construct_covariance_matrix(params['Q1_flat'], D)
+    # params['Q1'] = np.diag(np.exp(params['Q1_flat'])+eps)
     # params['Q1_F'] = construct_covariance_matrix(params['Q1_F_flat'], D)
     params['Q'] = construct_covariance_matrix(params['Q_flat'], D)
+    # params['Q'] = np.diag(np.exp(params['Q_flat'])+eps)
     # params['Q_F'] = construct_covariance_matrix(params['Q_F_flat'], D)
 
     # params['Q'] = np.sqrt(0.1) * np.eye(D)
@@ -363,9 +396,76 @@ def get_constrained_prior_params(params, D, U):
     # params['A'] = construct_dynamics_matrix(params['A_u'], params['A_v'], params['A_s'], D)
     # params['Abar'] = construct_dynamics_matrix(params['Abar_u'], params['Abar_v'], params['Abar_s'], D)
     # params['K'] = np.linalg.pinv(params['B']) @ (params['Abar'] - params['A'])
-    params['S'] = construct_covariance_matrix(params['S_flat'], U)
+    # params['S'] = construct_covariance_matrix(params['S_flat'], U)
 
     return params
+
+def log_prob_under_prior(prior_params, x, u):
+
+    def log_prop_one_transition(A, x_prev, B, u_prev, Q, x):
+
+        return MVN(loc=A @ x_prev + B @ u_prev, covariance_matrix=Q).log_prob(x)
+
+    log_prop_all_transitions = vmap(log_prop_one_transition, in_axes=(None,0,None,0,None,0))
+
+    m1 = prior_params['m1']
+    Q1 = prior_params['Q1']
+    A = prior_params['A']
+    B = prior_params['B']
+    Q = prior_params['Q']
+
+    ll = MVN(loc=m1, covariance_matrix=Q1).log_prob(x[0])
+    ll += log_prop_all_transitions(A, x[:-1], B, u[:-1], Q, x[1:]).sum()
+
+    return ll
+
+def log_normalizer(prior_params, smoothed, potentials, u):
+    
+    def predictive_distribution_one_transition(mu_filtered, Sigma_filtered, A, B, u, Q):
+
+        mu = A @ mu_filtered + B @ u
+        Sigma = A @ Sigma_filtered @ A.T + Q
+
+        return mu, Sigma
+
+    predictive_distribution_all_transitions = vmap(predictive_distribution_one_transition, in_axes=(0,0,None,None,0,None))
+
+    def conditional_marginal_likelihood_one_observation(mu_pred, Sigma_pred, mu_rec, Sigma_rec):
+
+        return MVN(loc=mu_pred, covariance_matrix=Sigma_pred + Sigma_rec).log_prob(mu_rec)
+
+    conditional_marginal_likelihood_all_observations = vmap(conditional_marginal_likelihood_one_observation)
+
+    m1 = prior_params['m1']
+    Q1 = prior_params['Q1']
+    A = prior_params['A']
+    B = prior_params['B']
+    Q = prior_params['Q']
+
+    mu, Sigma = predictive_distribution_all_transitions(smoothed["filtered_means"][:-1], smoothed["filtered_covariances"][:-1], A, B, u[:-1], Q)
+
+    mu_pred = np.concatenate([m1[None], mu])
+    Sigma_pred = np.concatenate([Q1[None], Sigma])
+    mu_rec, Sigma_rec = potentials["mu"], potentials["Sigma"]
+
+    ll = conditional_marginal_likelihood_all_observations(mu_pred, Sigma_pred, mu_rec, Sigma_rec).sum()
+
+    return ll
+
+def log_prob_under_posterior(prior_params, emission_potentials, smoothed, u):
+
+    def log_prop_one_emission(mu, Sigma, x):
+
+        return MVN(loc=mu, covariance_matrix=Sigma).log_prob(x)
+
+    log_prop_all_emissions = vmap(log_prop_one_emission)
+
+    # ll = log_prob_under_prior(prior_params, smoothed['smoothed_means'], u)
+    # ll += log_prop_all_emissions(emission_potentials["mu"], emission_potentials["Sigma"], smoothed['smoothed_means']).sum()
+    ll = log_prop_all_emissions(emission_potentials["mu"], emission_potentials["Sigma"], smoothed['smoothed_means']).sum()
+    ll -= log_normalizer(prior_params, smoothed, emission_potentials, u)
+
+    return ll
 
 def get_marginals_of_joint(mu, Sigma, T, D):
 
@@ -407,6 +507,17 @@ def perform_Kalman_smoothing(p, emissions_potentials, u):
     return smoothed
 
 batch_perform_Kalman_smoothing = vmap(perform_Kalman_smoothing, in_axes=(None,0,0))
+
+def perform_Kalman_smoothing_true_params(p, y, u):
+
+    params = make_lgssm_params(p["m1"], p["Q1"], p["A"], p["Q"], p["C"], p["R"],
+                               dynamics_input_weights=p["B"], emissions_bias=p["d"])
+
+    smoothed = lgssm_smoother(params, y, u)._asdict()
+
+    return smoothed
+
+batch_perform_Kalman_smoothing_true_params = vmap(perform_Kalman_smoothing_true_params, in_axes=(None,0,0))
 
 def R2_inferred_vs_actual_z(posterior_means, true_z):
 
@@ -499,13 +610,13 @@ def closed_form_LDS_updates(params, smoothed, u, mean_field_q):
     mu_diff = smoothed['smoothed_means'][:, 0, :] - params["prior_params"]["m1"]
     params["prior_params"]["Q1"] = smoothed["smoothed_covariances"][:, 0, :, :].mean(axis=(0,)) + np.einsum("jk,jl->jkl", mu_diff, mu_diff).mean(axis = 0)
 
-    params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
-    # params["prior_params"]["Abar"] = truncate_singular_values(params["prior_params"]["Abar"])
+    # params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
+    # # params["prior_params"]["Abar"] = truncate_singular_values(params["prior_params"]["Abar"])
 
-    params["prior_params"]["Q"] = (params["prior_params"]["Q"] + params["prior_params"]["Q"].T)/2
-    params["prior_params"]["Q"] += np.eye(D) * 1e-4
-    params["prior_params"]["Q1"] = (params["prior_params"]["Q1"] + params["prior_params"]["Q1"].T)/2
-    params["prior_params"]["Q1"] += np.eye(D) * 1e-4
+    # params["prior_params"]["Q"] = (params["prior_params"]["Q"] + params["prior_params"]["Q"].T)/2
+    # params["prior_params"]["Q"] += np.eye(D) * 1e-6
+    # params["prior_params"]["Q1"] = (params["prior_params"]["Q1"] + params["prior_params"]["Q1"].T)/2
+    # params["prior_params"]["Q1"] += np.eye(D) * 1e-6
 
     # params["prior_params"]["Q"] = np.linalg.cholesky(params["prior_params"]["Q"])[np.tril_indices(D)]
     # params["prior_params"]["Q1"] = np.linalg.cholesky(params["prior_params"]["Q1"])[np.tril_indices(D)]
@@ -686,13 +797,17 @@ def dynamics_to_tridiag(prior_params, T):
     J = np.zeros((T, D, D))
     J = J.at[0].add(psd_solve(Q1, np.eye(Q1.shape[-1])))
     J = J.at[:-1].add(A.T @ Q_inv_A)
-    J = J.at[1:].add(psd_solve(Q1, np.eye(Q.shape[-1])))
+    J = J.at[1:].add(psd_solve(Q, np.eye(Q.shape[-1])))
     
     # upper diagonal blocks of precision matrix
     L = -Q_inv_A.T
     L = np.tile(L[None, :, :], (T - 1, 1, 1))
     
     return { "J": J, "L": L}
+
+def get_beta_schedule(options):
+
+    return optax.linear_schedule(options["beta_init_value"], options["beta_end_value"], options["beta_transition_steps"], options["beta_transition_begin"])
 
 def get_group_name(options):
 

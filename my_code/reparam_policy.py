@@ -1,6 +1,6 @@
-rofrom jax import numpy as np
+from jax import numpy as np
 from jax import random, jit, vmap, value_and_grad
-from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, get_constrained_prior_params, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, initialise_LDS_params_M_step
+from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, get_constrained_prior_params, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, initialise_LDS_params_via_M_step
 from jax.lax import scan, stop_gradient
 from flax import linen as nn
 
@@ -134,6 +134,7 @@ def compute_free_energy(prior_params, prior, J_RPM, h_RPM, mu_RPM, Sigma_RPM, po
     B, T, D = mu_RPM.shape[0], h_RPM.shape[0], h_RPM.shape[1]
 
     kl_qp = kl_qp_natural_parameters(posterior['J'], posterior['h'], prior['J'], prior['h'])
+    kl_qp = 0.
 
     Sigma_posterior = psd_solve(posterior['J'], np.eye(posterior['J'].shape[-1]))
     mu_posterior = Sigma_posterior @ posterior['h']
@@ -207,7 +208,7 @@ def train_step(params, opt_states, y, u_raw, key, options):
 
         else:
 
-            prior_marginal = marginal(prior_params, D, T) # treat parameters of p(z'|z) as free (implicit) parameters of the q distribution
+            prior_marginal = marginal(prior_params, T) # treat parameters of p(z'|z) as free (implicit) parameters of the q distribution
 
         RPM = {}
         RPM['J'] = prior_marginal['J'][None] + RPM_norm["J"]
@@ -295,9 +296,9 @@ B = 100
 T = 100
 D = 2
 U = 1
-h_dim_rpm = 5
-h_dim_u_emb = 5
-carry_dim = 10
+h_dim_rpm = 50
+h_dim_u_emb = 50
+carry_dim = 50
 prior_lr = 1e-3
 learning_rate = 1e-3
 max_grad_norm = 10
@@ -309,7 +310,7 @@ options['initialise_LDS_M_step'] = True
 options['normalise_y'] = True
 options['embed_u'] = False
 options['use_LDS_for_F_in_q'] = True
-options['explicitly_integrate_out_u'] = True
+options['explicitly_integrate_out_u'] = False
 options['use_MM_for_F_in_q'] = False
 options['use_GRU_for_F_in_q'] = False
 options['use_policy_loss'] = False
@@ -320,34 +321,6 @@ options['project_name'] = 'RPM-mycode'
 
 seed = 5
 subkey1, subkey2, subkey3, subkey4, subkey5, subkey6, key = random.split(random.PRNGKey(seed), 7)
-
-RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
-params = {}
-if options['f_time_dependent']:
-    params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
-else:
-    params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
-
-# if options['initialise_LDS_M_step']:
-#     params["prior_params"] = initialise_LDS_params_M_step(D, U, subkey2)
-# else:
-params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step = False)
-
-u_emb = control_network(u_emb_dim=U, h_dim=h_dim_u_emb)
-params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5})
-
-F_approx = F_for_q(carry_dim=carry_dim, z_dim=D)
-params["F_approx_params"] = F_approx.init(inputs = np.ones((T,1)), rngs = {'params': subkey6})
-
-rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
-prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
-u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
-F_approx_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
-
-all_optimisers = (rpm_opt, prior_opt, u_emb_opt, F_approx_opt)
-all_params = (params["rpm_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"])
-all_models = (RPM, RPM, u_emb, F_approx)
-opt_states, mngr = get_train_state(options['save_dir'], all_models, all_optimisers, all_params)
 
 if options['fit_LDS']:
 
@@ -370,12 +343,38 @@ if options['normalise_y']:
 
     y = scale_y(y)
 
+RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
+params = {}
+if options['f_time_dependent']:
+    params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
+else:
+    params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
+
+if options['initialise_LDS_M_step']:
+    params["prior_params"] = initialise_LDS_params_via_M_step(RPM, params["rpm_params"], y, u, subkey2, options, closed_form_M_Step=False)
+else:
+    params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step = False)
+
+u_emb = control_network(u_emb_dim=U, h_dim=h_dim_u_emb)
+params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5})
+
+F_approx = F_for_q(carry_dim=carry_dim, z_dim=D)
+params["F_approx_params"] = F_approx.init(inputs = np.ones((T,1)), rngs = {'params': subkey6})
+
+rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
+prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
+u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
+F_approx_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
+
+all_optimisers = (rpm_opt, prior_opt, u_emb_opt, F_approx_opt)
+all_params = (params["rpm_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"])
+all_models = (RPM, RPM, u_emb, F_approx)
+opt_states, mngr = get_train_state(options['save_dir'], all_models, all_optimisers, all_params)
+
 train_step_jit = jit(partial(value_and_grad(train_step, has_aux=True), options=options))
 
 print("policy loss not implemented!")
-
-if options['initialise_LDS_M_step']:
-    params = initialise_LDS_params_M_step(params, opt_states, y, u, subkey2, options, closed_form_M_Step = False)
+print("kl_qp set to 0!")
 
 pbar = trange(n_epochs)
 for itr in pbar:
