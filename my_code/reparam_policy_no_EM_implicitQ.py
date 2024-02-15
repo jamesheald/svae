@@ -1,6 +1,6 @@
 from jax import numpy as np
 from jax import random, jit, vmap, value_and_grad
-from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, initialise_LDS_params_via_M_step, log_prob_under_posterior
+from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, get_constrained_prior_params, initialise_LDS_params_via_M_step, log_prob_under_posterior, sample_from_MVN, batch_expected_log_f_over_F
 from jax.lax import scan, stop_gradient
 from flax import linen as nn
 
@@ -160,23 +160,94 @@ class GRUCell_LN(nn.RNNCellBase):
     def num_feature_axes(self) -> int:
         return 1
 
-# class GRU_Cell(nn.Module):
-#     carry_dim: int
-    
+class implicit_q(nn.Module):
+    carry_dim: int
+    z_dim: int
+
+    def setup(self):
+        
+        self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
+
+        self.carry_init_forward = self.param('carry_init_forward', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
+        self.carry_init_backward = self.param('carry_init_backward', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
+
+        self.dense = nn.Dense(self.z_dim)
+
+    def __call__(self, y, u, key):
+
+        noise = random.normal(key, y.shape)
+
+        concatenated_carry = self.BiGRU(np.concatenate((y, u, noise), axis=1), initial_carry=(self.carry_init_forward, self.carry_init_backward))
+
+        z = self.dense(concatenated_carry)
+
+        return z
+
+# class discriminate(nn.Module):
+#     h_dim: int
+
 #     @nn.compact
-#     def __call__(self, inputs, carry=None):
-        
-#         if carry is None:
-            
-#             # learnable initial carry
-#             carry = self.param('carry_init', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
-        
-#         # x = nn.LayerNorm()(y)
-#         # https://arxiv.org/pdf/1607.06450.pdf
-#         # https://github.com/ElektrischesSchaf/LayerNorm_GRU
-#         carry, outputs = nn.GRUCell()(carry, inputs)
-        
-#         return carry, outputs
+#     def __call__(self, x):
+
+#         x = nn.LayerNorm()(nn.Dense(features = self.h_dim)(x))
+#         x = nn.relu(x)
+#         x = nn.LayerNorm()(nn.Dense(features = self.h_dim)(x))
+#         x = nn.relu(x)
+#         x = nn.Dense(features = 1)(x)
+
+#         return x
+
+class estimate_log_density_ratio(nn.Module):
+    h_dim: int
+
+    def setup(self):
+
+        self.dense_1 = nn.Dense(features=self.h_dim)
+        self.LN_1 = nn.LayerNorm()
+        self.dense_2 = nn.Dense(features=self.h_dim)
+        self.LN_2 = nn.LayerNorm()
+        self.dense_3 = nn.Dense(features=1)
+
+    def __call__(self, z_p, z_q, y, u):
+
+        def discriminator(x):
+
+            x = self.LN_1(self.dense_1(x))
+            x = nn.relu(x)
+            x = self.LN_2(self.dense_2(x))
+            x = nn.relu(x)
+            x = self.dense_3(x)
+
+            return x
+
+        def bernoulli_logarithmic_loss(z_p, z_q, y, u):
+
+            # estimate of the log density ratio, log q(tau_z_0 | tau_0) - log p(tau_z_0), given a sample of tau_z_0 from p(tau_z_0)
+            log_density_ratio_prior_sample = discriminator(np.concatenate((z_p, y, u), axis = 1))
+
+            # estimate of the log density ratio, log q(tau_z_0 | tau_0) - log p(tau_z_0), given a sample of tau_z_0 from q(tau_z_0 | tau_0)
+            log_density_ratio_posterior_sample = discriminator(np.concatenate((z_q, y, u), axis = 1))
+
+            # loss to train the log density ratio estimator
+            # loss = np.log(nn.sigmoid(log_density_ratio_posterior_sample)) + np.log(1 - nn.sigmoid(log_density_ratio_prior_sample))
+            loss = - nn.log_sigmoid(log_density_ratio_posterior_sample) - nn.log_sigmoid(-log_density_ratio_prior_sample)
+
+            return loss.mean(), log_density_ratio_posterior_sample 
+
+            # logits = np.concatenate((log_density_ratio_posterior_sample,log_density_ratio_prior_sample))
+            # labels = np.concatenate((np.ones(B), np.zeros(B)))
+            # loss = opt.sigmoid_binary_cross_entropy(logits, labels)
+
+            # return loss, log_density_ratio_posterior_sample
+
+        # loss_grad = value_and_grad(bernoulli_logarithmic_loss, has_aux = True)
+
+        # (loss, log_density_ratio_posterior_sample), grads = loss_grad(self.discriminator.variables, z_p.reshape(z_p.shape[0], -1), z_q.reshape(z_q.shape[0], -1), y.reshape(y.shape[0], -1))
+
+        batch_size = y.shape[0]
+        loss, log_density_ratio_posterior_sample = bernoulli_logarithmic_loss(z_p.reshape(batch_size, -1), z_q.reshape(batch_size, -1), y.reshape(batch_size, -1), u.reshape(batch_size, -1))
+
+        return log_density_ratio_posterior_sample, loss
 
 class delta_q_params(nn.Module):
     carry_dim: int
@@ -184,8 +255,7 @@ class delta_q_params(nn.Module):
 
     def setup(self):
         
-        self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
-        # self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell_LN(self.carry_dim)), nn.RNN(nn.GRUCell_LN(self.carry_dim)))
+        self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
 
         self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
 
@@ -264,6 +334,63 @@ class GRUCell_LN_NoInput(nn.RNNCellBase):
     @property
     def num_feature_axes(self) -> int:
         return 1
+
+# network for creating time-dependent RPM factors f_t(z_t | x_t), where the time dependence is provided by a GRU
+class GRU_RPM(nn.Module):
+    carry_dim: int
+    h_dim: int
+    z_dim: int
+    T: int
+
+    def setup(self):
+        
+        self.GRU = nn.RNN(GRUCell_LN_NoInput(self.carry_dim))
+        # self.GRU = nn.RNN(nn.GRUCell(self.carry_dim))
+
+        self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
+
+        self.dense_1 = nn.Dense(features=self.h_dim)
+        self.LN_1 = nn.LayerNorm()
+        self.dense_2 = nn.Dense(features=self.h_dim)
+        self.LN_2 = nn.LayerNorm()
+        self.dense_3 = nn.Dense(features=self.h_dim)
+        self.LN_3 = nn.LayerNorm()
+        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+
+    def __call__(self, y):
+
+        def get_natural_parameters(x):
+
+            mu, var_output_flat = np.split(x, [self.z_dim])
+
+            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+
+            J = psd_solve(Sigma, np.eye(self.z_dim))
+            h = J @ mu
+
+            return Sigma, mu, J, h
+
+        carry = self.GRU(np.zeros((self.T,1)), initial_carry=self.carry_init)
+
+        # x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(y.shape[0], axis=0), y), axis=2)))
+        # x = nn.relu(x)
+        # x = self.LN_2(self.dense_2(x))
+        # x = nn.relu(x)
+        # x = self.LN_3(self.dense_3(x))
+        # x = nn.relu(x)
+        # x = self.dense_4(x)
+
+        x = self.LN_1(self.dense_1(y))
+        x = nn.relu(x)
+        x = self.LN_2(self.dense_2(x))
+        x = nn.relu(x)
+        x = self.LN_3(self.dense_3(x))
+        x = nn.relu(x)
+        x = self.dense_4(np.concatenate((carry[None].repeat(x.shape[0], axis=0), x), axis=2))
+
+        Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
+
+        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
 
 class F_for_q(nn.Module):
     carry_dim: int
@@ -394,244 +521,154 @@ class rpm_network(nn.Module):
 
         return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
 
-class GRU_RPM(nn.Module):
-    carry_dim: int
-    h_dim: int
-    z_dim: int
-    T: int
+# def compute_free_energy(J_RPM, mu_RPM, Sigma_RPM, smoothed, emission_potentials, u, key, batch_id, options):
 
-    def setup(self):
-        
-        self.GRU = nn.RNN(GRUCell_LN_NoInput(self.carry_dim))
-        # self.GRU = nn.RNN(nn.GRUCell(self.carry_dim))
+#     B, T, D = mu_RPM.shape[0], mu_RPM.shape[1], mu_RPM.shape[2]
 
-        self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
-
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-
-    def __call__(self, y):
-
-        def get_natural_parameters(x):
-
-            mu, var_output_flat = np.split(x, [self.z_dim])
-
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-
-            J = psd_solve(Sigma, np.eye(self.z_dim))
-            h = J @ mu
-
-            return Sigma, mu, J, h
-
-        carry = self.GRU(np.zeros((self.T,1)), initial_carry=self.carry_init)
-
-        x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(y.shape[0], axis=0), y), axis=2)))
-        x = nn.relu(x)
-        x = self.LN_2(self.dense_2(x))
-        x = nn.relu(x)
-        x = self.LN_3(self.dense_3(x))
-        x = nn.relu(x)
-        x = self.dense_4(x)
-
-        Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
-
-        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
-
-def compute_free_energy_E_step(prior_params, prior_JL, J_RPM, mu_RPM, Sigma_RPM, smoothed, emission_potentials, u, key, batch_id, options):
-
-    B, T, D = mu_RPM.shape[0], mu_RPM.shape[1], mu_RPM.shape[2]
-
-    posterior_entropy = 0.5 * D * T - log_prob_under_posterior(prior_params, emission_potentials, smoothed, u)
-    cross_entropy = 0.5 * np.einsum("tij,tij->", prior_JL["J"], smoothed['smoothed_covariances'])
-    Sigmatnt = smoothed['smoothed_cross_covariances'] - np.einsum("ti,tj->tij", smoothed['smoothed_means'][:-1], smoothed['smoothed_means'][1:])
-    cross_entropy += np.einsum("tij,tij->", prior_JL["L"], Sigmatnt) # no 0.5 weighting because this term is counted twice (once for the lower diagonal and once for the upper diagonal)
-    # cross_entropy -= log_prob_under_prior(prior_params, smoothed['smoothed_means'], u) # commented out along with call in log_prob_under_posterior, as they cancel
-    kl_qp = cross_entropy - posterior_entropy
-
-    ce_qf = 0.5 * np.einsum("tij,tij->", J_RPM, smoothed['smoothed_covariances'])
-    ce_qf -= MVN(loc=mu_RPM[batch_id], covariance_matrix=Sigma_RPM[batch_id]).log_prob(smoothed['smoothed_means']).sum()
+#     ce_qf = 0.5 * np.einsum("tij,tij->", J_RPM, smoothed['smoothed_covariances'])
+#     ce_qf -= MVN(loc=mu_RPM[batch_id], covariance_matrix=Sigma_RPM[batch_id]).log_prob(smoothed['smoothed_means']).sum()
     
-    n_samples = options['num_MC_samples']
-    keys = random.split(key, n_samples)
-    ce_qF = - batch_expected_log_F(smoothed['smoothed_means'], smoothed['smoothed_covariances'], mu_RPM, Sigma_RPM, keys).mean()
+#     n_samples = options['num_MC_samples']
+#     keys = random.split(key, n_samples)
+#     ce_qF = - batch_expected_log_F(smoothed['smoothed_means'], smoothed['smoothed_covariances'], mu_RPM, Sigma_RPM, keys).mean()
 
-    T_log_B = T * np.log(B)
 
-    kl_qp /= (T * D)
-    ce_qf /= (T * D)
-    ce_qF /= (T * D)
-    T_log_B /= (T * D)
+#     expected_log_f_over_F(mu_posterior, Sigma_posterior, rpm_mu, rpm_Sigma, samples,batch_id)
+#     T_log_B = T * np.log(B)
 
-    return kl_qp, ce_qf, ce_qF, T_log_B
+#     kl_qp /= (T * D)
+#     ce_qf /= (T * D)
+#     ce_qF /= (T * D)
+#     T_log_B /= (T * D)
 
-def compute_free_energy_M_step(J_RPM, mu_RPM, Sigma_RPM, smoothed, key, batch_id, options):
-
-    B, T, D = mu_RPM.shape[0], mu_RPM.shape[1], mu_RPM.shape[2]
-
-    ce_qf = 0.5 * np.einsum("tij,tij->", J_RPM, smoothed['smoothed_covariances'])
-    ce_qf -= MVN(loc=mu_RPM[batch_id], covariance_matrix=Sigma_RPM[batch_id]).log_prob(smoothed['smoothed_means']).sum()
-    
-    n_samples = options['num_MC_samples']
-    keys = random.split(key, n_samples)
-    ce_qF = - batch_expected_log_F(smoothed['smoothed_means'], smoothed['smoothed_covariances'], mu_RPM, Sigma_RPM, keys).mean()
-
-    T_log_B = T * np.log(B)
-
-    ce_qf /= (T * D)
-    ce_qF /= (T * D)
-    T_log_B /= (T * D)
-
-    return ce_qf, ce_qF, T_log_B
+#     return kl_qp, ce_qf, ce_qF, T_log_B
 
 def get_RPM_factors(params, opt_states, y, options):
 
-    rpm_opt_state, _, _, _, F_approx_opt_state = opt_states
+    rpm_opt_state, _, _, _, _, _, _ = opt_states
 
-    # RPM_constant = rpm_opt_state.apply_fn(params["rpm_params"], y)
+    RPM = rpm_opt_state.apply_fn(params["rpm_params"], y)
 
-    # T = y.shape[1]
-    # if options['use_LDS_for_F_in_q']:
+    return RPM
 
-    #     RPM_time_varying = marginal(params['prior_params'], T) # treat parameters of p(z'|z) as free (implicit) parameters of the q distribution
+def get_posterior_samples(params, opt_states, y, u, key):
 
-    # elif options['use_GRU_for_F_in_q']:
+    _, _, _, _, _, _, q_sample_opt = opt_states
 
-    #     RPM_time_varying = F_approx_opt_state.apply_fn(params["F_approx_params"])
+    B = u.shape[0]
+    keys = random.split(key, B)
+    z = vmap(q_sample_opt.apply_fn, in_axes=(None,0,0,0))(params["q_sample_params"], y, u, keys)
 
-    # RPM = {}
-    # RPM['J'] = RPM_time_varying['J'][None] + RPM_constant["J"]
-    # RPM['h'] = RPM_time_varying['h'][None] + RPM_constant["h"]
-    # RPM['Sigma'] = vmap(vmap(lambda S: psd_solve(S, np.eye(S.shape[-1]))))(RPM['J'])
-    # RPM['mu'] = np.einsum("hijk,hik->hij", RPM['Sigma'], RPM['h'])
+    return z
 
-    RPM = F_approx_opt_state.apply_fn(params["F_approx_params"], y)
+def sample_next_z(carry, inputs):
 
-    # RPM_constant = rpm_opt_state.apply_fn(params["rpm_params"], y)
+    z, p = carry
+    u, key = inputs
 
-    return RPM, RPM
+    z = p['A'] @ z + p['B'] @ u + sample_from_MVN(p['Q'], key)
 
-def get_posterior(params, prior_params, opt_states, y, u, RPM_constant):
+    carry = z, p
+    outputs = z
 
-    _, delta_q_opt, _, _, _ = opt_states
+    return carry, outputs
 
-    # delta_q_potentials = vmap(delta_q_opt.apply_fn, in_axes=(None,0))(params["delta_q_params"], y)
+def get_prior_samples(p, u, key):
 
-    # emission_potentials = {}
-    # emission_potentials['Sigma'] = vmap(vmap(lambda J1, J2: psd_solve(J1 + J2, np.eye(J1.shape[-1]))))(RPM_constant['J'], delta_q_potentials['J'])
-    # emission_potentials['mu'] = vmap(vmap(lambda h1, h2, S: S @ (h1 + h2)))(RPM_constant['h'], delta_q_potentials['h'], emission_potentials['Sigma'])
+    subkey, key = random.split(key)
+    z0 = p['m1'] + sample_from_MVN(p['Q1'], subkey)
 
-    emission_potentials = vmap(delta_q_opt.apply_fn, in_axes=(None,0))(params["delta_q_params"], y)
+    carry = z0, p
+    keys = random.split(key, u.shape[0]-1)
+    inputs = u[:-1,:], keys
+    _, z = scan(sample_next_z, carry, inputs)
 
-    smoothed = batch_perform_Kalman_smoothing(prior_params, emission_potentials, u)
+    return np.concatenate((z0[None], z))
 
-    return smoothed, emission_potentials
+batch_get_prior_samples = vmap(get_prior_samples, in_axes=(None,0,0))
 
-def get_free_energy_E_step(params, prior_params, prior_JL, opt_states, y, u, RPM_constant, RPM, key, beta, options):
+def get_free_energy(params, opt_states, y, u, beta, key, options):
 
-    smoothed, emission_potentials = get_posterior(params, prior_params, opt_states, y, u, RPM_constant)
+    RPM = get_RPM_factors(params, opt_states, y, options)
+
+    T, U = y.shape[1], u.shape[-1]
+    prior_params = get_constrained_prior_params(params['prior_params'], U)
+
+    subkey1, subkey2, key = random.split(key, 3)
+    z_q = get_posterior_samples(params, opt_states, y, u, subkey1)
+
+    B = u.shape[0]
+    keys = random.split(subkey2, B)
+    z_p = batch_get_prior_samples(prior_params, u, keys)
+
+    _, _, _, _, _, LDRE, _ = opt_states
+
+    kl_qp, LDRE_loss = LDRE.apply_fn(params["LDRE_params"], z_p, z_q, y, u)
 
     B = y.shape[0]
-    keys = random.split(key, B)
-    kl_qp, ce_qf, ce_qF, T_log_B = vmap(compute_free_energy_E_step, in_axes=(None,None,0,None,None,0,0,0,0,0,None))(prior_params, prior_JL, RPM['J'], RPM['mu'], RPM['Sigma'], smoothed, emission_potentials, u, keys, np.arange(B), options)
-    free_energy = - beta * kl_qp - ce_qf + ce_qF - T_log_B
+    log_f_over_F = batch_expected_log_f_over_F(RPM['mu'], RPM['Sigma'], z_q, np.arange(B))
+    T_log_B = T * np.log(B)
 
-    return -free_energy.mean(), (kl_qp, ce_qf, ce_qF)
+    free_energy = - beta * kl_qp + log_f_over_F - T_log_B
 
-get_value_and_grad_E_step = value_and_grad(get_free_energy_E_step, has_aux=True)
+    return -free_energy.mean(), (kl_qp, log_f_over_F, z_q)
 
-def one_E_Step(carry, inputs, options):
+get_value_and_grad = value_and_grad(get_free_energy, has_aux=True)
 
-    params, prior_JL, opt_states, y, u, RPM_constant, RPM, beta = carry
-    key = inputs
+def get_LDRE_loss(params, opt_states, y, u, key):
 
-    (loss, (kl_qp, ce_qf, ce_qF)), grads = get_value_and_grad_E_step(params, params['prior_params'], prior_JL, opt_states, y, u, RPM_constant, RPM, key, beta, options)
-    params, opt_states = params_update_E_step(grads, opt_states)
+    U = u.shape[-1]
+    prior_params = get_constrained_prior_params(params['prior_params'], U)
 
-    carry = params, prior_JL, opt_states, y, u, RPM_constant, RPM, beta
-    outputs = loss, kl_qp, ce_qf, ce_qF
+    subkey1, subkey2, key = random.split(key, 3)
+    z_q = get_posterior_samples(params, opt_states, y, u, subkey1)
 
-    return carry, outputs
+    B = u.shape[0]
+    keys = random.split(subkey2, B)
+    z_p = batch_get_prior_samples(prior_params, u, keys)
 
-def E_step(params, opt_states, y, u, key, beta, options):
+    _, _, _, _, _, LDRE, _ = opt_states
 
-    RPM_constant, RPM = get_RPM_factors(params, opt_states, y, options)
+    _, LDRE_loss = LDRE.apply_fn(params["LDRE_params"], z_p, z_q, y, u)
 
-    T = y.shape[1]
-    prior_JL = dynamics_to_tridiag(params['prior_params'], T)
+    return LDRE_loss
 
-    # perform multiple gradient ascent steps on the q (while keeping parameters fixed)
-    carry = params, prior_JL, opt_states, y, u, RPM_constant, RPM, beta
-    keys = random.split(key, options['num_E_steps'])
-    (params, _, opt_states, _, _, _, _, _), (loss, kl_qp, ce_qf, ce_qF) = scan(partial(one_E_Step, options=options), carry, keys)
+get_value_and_grad_LDRE_loss = value_and_grad(get_LDRE_loss)
 
-    smoothed, _ = get_posterior(params, params['prior_params'], opt_states, y, u, RPM_constant)
-
-    return params, opt_states, smoothed, (loss, kl_qp, ce_qf, ce_qF)
-
-def get_free_energy_M_step(params, opt_states, y, key, smoothed, options):
-
-    _, RPM = get_RPM_factors(params, opt_states, y, options)
-
-    keys = random.split(key, B)
-    ce_qf, ce_qF, T_log_B = vmap(compute_free_energy_M_step, in_axes=(0,None,None,0,0,0,None))(RPM['J'], RPM['mu'], RPM['Sigma'], smoothed, keys, np.arange(B), options)
-    free_energy = - ce_qf + ce_qF - T_log_B
-
-    return -free_energy.mean(), (ce_qf, ce_qF)
-
-get_value_and_grad_M_step = value_and_grad(get_free_energy_M_step, has_aux=True)
-
-def one_M_Step(carry, inputs, options):
-
-    params, opt_states, y, u, smoothed = carry
-    key = inputs
-
-    (loss, (ce_qf, ce_qF)), grads = get_value_and_grad_M_step(params, opt_states, y, key, smoothed, options)
-    params, opt_states = params_update_M_step(grads, opt_states)
-
-    carry = params, opt_states, y, u, smoothed
-    outputs = loss, ce_qf, ce_qF
-
-    return carry, outputs
-
-def M_step(params, opt_states, y, u, smoothed, key, options):
-
-    # perform multiple gradient ascent steps on the RPM parameters (while keeping q fixed)
-    carry = params, opt_states, y, u, smoothed
-    keys = random.split(key, options['num_M_steps'])
-    (params, opt_states, _, _, _), (loss, ce_qf, ce_qF) = scan(partial(one_M_Step, options=options), carry, keys)
-
-    return params, opt_states, (loss, ce_qf, ce_qF)
-
-def params_update_M_step(grads, opt_states):
+def params_update_model(grads, opt_states):
     
-    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
+    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state, LDRE_opt, q_sample_opt = opt_states
 
     rpm_opt_state = rpm_opt_state.apply_gradients(grads = grads["rpm_params"])
 
+    delta_q_opt = delta_q_opt.apply_gradients(grads = grads["delta_q_params"])
+
     prior_opt_state = prior_opt_state.apply_gradients(grads = grads["prior_params"])
+    prior_opt_state.params["A"] = truncate_singular_values(prior_opt_state.params["A"])
     # prior_opt_state.params["A_F"] = truncate_singular_values(prior_opt_state.params["A_F"])
 
     F_approx_opt_state = F_approx_opt_state.apply_gradients(grads = grads["F_approx_params"])
 
+    # LDRE_opt = LDRE_opt.apply_gradients(grads = grads["LDRE_params"])
+
+    q_sample_opt = q_sample_opt.apply_gradients(grads = grads["q_sample_params"])
+
     params = {}
     params["rpm_params"] = rpm_opt_state.params
     params["delta_q_params"] = delta_q_opt.params
     params["prior_params"] = prior_opt_state.params
     params["u_emb_params"] = control_state.params
     params["F_approx_params"] = F_approx_opt_state.params
+    params["LDRE_params"] = LDRE_opt.params
+    params["q_sample_params"] = q_sample_opt.params
 
-    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
+    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state, LDRE_opt, q_sample_opt]
 
-def params_update_E_step(grads, opt_states):
+def params_update_LDRE(grads, opt_states):
     
-    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
+    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state, LDRE_opt, q_sample_opt = opt_states
 
-    delta_q_opt = delta_q_opt.apply_gradients(grads = grads["delta_q_params"])
+    LDRE_opt = LDRE_opt.apply_gradients(grads = grads["LDRE_params"])
 
     params = {}
     params["rpm_params"] = rpm_opt_state.params
@@ -639,23 +676,20 @@ def params_update_E_step(grads, opt_states):
     params["prior_params"] = prior_opt_state.params
     params["u_emb_params"] = control_state.params
     params["F_approx_params"] = F_approx_opt_state.params
+    params["LDRE_params"] = LDRE_opt.params
+    params["q_sample_params"] = q_sample_opt.params
 
-    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
+    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state, LDRE_opt, q_sample_opt]
 
 def train_step(params, opt_states, y, u, key, beta, options):
 
-    key_E_step, key_M_step = random.split(key, 2)
+    (loss, (kl_qp, log_f_over_F, z_q)), grads = get_value_and_grad(params, opt_states, y, u, beta, key, options)
+    params, opt_states = params_update_model(grads, opt_states)
 
-    # E step (variational EM)
-    params, opt_states, smoothed, (loss, kl_qp, ce_qf, ce_qF) = E_step(params, opt_states, y, u, key_E_step, beta, options)
+    LDRE_loss, grads = get_value_and_grad_LDRE_loss(params, opt_states, y, u, key)
+    params, opt_states = params_update_LDRE(grads, opt_states)
 
-    # closed form update for prior parameters
-    params = closed_form_LDS_updates(params, smoothed, u, mean_field_q=False)
-
-    # M step (generalised EM)
-    params, opt_states, (loss, ce_qf, ce_qF) = M_step(params, opt_states, y, u, smoothed, key_M_step, options)
-
-    return params, opt_states, loss, ce_qf, ce_qF, smoothed['smoothed_means']
+    return params, opt_states, loss, kl_qp, log_f_over_F, z_q, LDRE_loss
 
 def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=[]):
 
@@ -665,7 +699,9 @@ def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=
                               'delta_q_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
                               'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
                               'u_emb_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
-                              'F_approx_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
+                              'F_approx_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                              'LDRE_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                              'implicitQ_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
                              options)
 
     states = []
@@ -675,15 +711,20 @@ def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=
         
     return states, mngr
 
-B = 50
+# import os
+# os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+# os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '.5'
+
+B = 250
 T = 100
 D = 2
 U = 1
 h_dim_rpm = 50
+h_dim_LDRE = 50
 h_dim_u_emb = 50
 carry_dim = 50
-prior_lr = 1e-3
-learning_rate = 1e-3
+prior_lr = 1e-2
+learning_rate = 1e-2
 max_grad_norm = 10
 n_epochs = 5000
 log_every = 250
@@ -699,8 +740,6 @@ options['use_GRU_for_F_in_q'] = True
 options['f_time_dependent'] = False
 options['initialise_via_M_step'] = False
 options['num_MC_samples'] = 1
-options['num_E_steps'] = 100
-options['num_M_steps'] = 1
 options["beta_init_value"] = 1.
 options["beta_end_value"] = 1.
 options["beta_transition_begin"] = 4000
@@ -710,7 +749,7 @@ options['save_dir'] = "/nfs/nhome/live/jheald/svae/my_code/runs"
 options['project_name'] = 'RPM-mycode'
 
 seed = 5
-subkey1, subkey2, subkey3, subkey4, subkey5, subkey6, subkey7, key = random.split(random.PRNGKey(seed), 8)
+subkey1, subkey2, subkey3, subkey4, subkey5, subkey6, subkey7, subkey8, subkey9, key = random.split(random.PRNGKey(seed), 10)
 
 if options['fit_LDS']:
 
@@ -734,39 +773,45 @@ if options['normalise_y']:
 
     y = scale_y(y)
 
-RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
+# RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
+RPM = GRU_RPM(carry_dim=carry_dim, h_dim=h_dim_rpm, z_dim=D, T=T)
 delta_q = delta_q_params(carry_dim=carry_dim, z_dim=D)
-# delta_q = rpm_network(z_dim=D, h_dim=h_dim_rpm)
 params = {}
 if options['f_time_dependent']:
     params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D+1)), rngs = {'params': subkey7})
 else:
-    params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
+    params["rpm_params"] = RPM.init(y = np.ones((B,T,D)), rngs = {'params': subkey1})
+    # params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D,)), rngs = {'params': subkey7})
 
 if options['initialise_via_M_step']:
-    params["prior_params"] = initialise_LDS_params_via_M_step(RPM, params["rpm_params"], y, u, subkey2, options, closed_form_M_Step=True)
+    params["prior_params"] = initialise_LDS_params_via_M_step(RPM, params["rpm_params"], y, u, subkey2, options, closed_form_M_Step=False)
 else:
-    params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step=True)
+    params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step=False)
 
 u_emb = control_network(u_emb_dim=U, h_dim=h_dim_u_emb)
 params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5})
 
-# F_approx = F_for_q(carry_dim=carry_dim, z_dim=D, T=T)
-# params["F_approx_params"] = F_approx.init(rngs = {'params': subkey6})
-F_approx = GRU_RPM(carry_dim=carry_dim, h_dim=h_dim_rpm, z_dim=D, T=T)
-params["F_approx_params"] = F_approx.init(y = np.zeros((B,T,D)),rngs = {'params': subkey6})
+F_approx = F_for_q(carry_dim=carry_dim, z_dim=D, T=T)
+params["F_approx_params"] = F_approx.init(rngs = {'params': subkey6})
+
+LDRE = estimate_log_density_ratio(h_dim=h_dim_LDRE)
+params["LDRE_params"] = LDRE.init(z_p = np.ones((B,T,D)), z_q = np.ones((B,T,D)), y = np.ones((B,T,D)), u = np.ones((B,T,U)), rngs = {'params': subkey8})
+q_sample = implicit_q(carry_dim=carry_dim, z_dim=D)
+params["q_sample_params"] = q_sample.init(y = np.ones((T,D)), u = np.ones((T,U)), key = random.PRNGKey(0), rngs = {'params': subkey9})
 
 rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 delta_q_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
 u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 F_approx_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
+LDRE_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
+q_sample_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 
-all_optimisers = (rpm_opt, delta_q_opt, prior_opt, u_emb_opt, F_approx_opt)
-all_params = (params["rpm_params"], params["delta_q_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"])
-all_models = (RPM, delta_q, RPM, u_emb, F_approx)
+all_optimisers = (rpm_opt, delta_q_opt, prior_opt, u_emb_opt, F_approx_opt, LDRE_opt, q_sample_opt)
+all_params = (params["rpm_params"], params["delta_q_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"], params["LDRE_params"], params["q_sample_params"])
+all_models = (RPM, delta_q, RPM, u_emb, F_approx, LDRE, q_sample)
 opt_states, mngr = get_train_state(options['save_dir'], all_models, all_optimisers, all_params)
 
 beta_schedule = get_beta_schedule(options)
@@ -775,8 +820,8 @@ train_step_jit = jit(partial(train_step, options=options))
 
 print("pass params around via opt_states not separately")
 print("not sure how to deal with u_embed in EM (not embedding at the moment)")
-# print("delta_q network made feedforward!")
-# print("delta_q_potentials used as emission_potentials!")
+
+breakpoint()
 
 pbar = trange(n_epochs)
 for itr in pbar:
@@ -787,19 +832,19 @@ for itr in pbar:
 
     if options['fit_LDS']:
 
-        params, opt_states, loss, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y, u, subkey, beta)
-        R2, predicted_z = R2_inferred_vs_actual_z(mu_posterior, smoothed_true_params['smoothed_means'])
+        params, opt_states, loss, kl_qp, log_f_over_F, z_q, LDRE_loss = train_step_jit(params, opt_states, y, u, subkey, beta)
+        R2, predicted_z = R2_inferred_vs_actual_z(z_q, smoothed_true_params['smoothed_means'])
 
     else:
 
-        params, opt_states, loss, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y[:B,:,:], u[:B,:,None], subkey, beta)
+        params, opt_states, loss, log_f_over_F, z_q, LDRE_loss = train_step_jit(params, opt_states, y[:B,:,:], u[:B,:,None], subkey, beta)
         R2 = 0.
 
-    pbar.set_description("train loss: {:.3f},  ce_qf: {:.3f}, ce_qF: {:.3f}, R2 train states: {:.3f}".format(loss[-1], ce_qf[-1,:].mean(), ce_qF[-1,:].mean(), R2))
+    pbar.set_description("train loss: {:.3f},  kl_qp: {:.3f}, log_f_over_F: {:.3f}, LDRE_loss: {:.3f}, R2 train states: {:.3f}".format(loss, kl_qp.mean(), log_f_over_F.mean(), LDRE_loss.mean(), R2))
 
     if itr % log_every == 0:
 
-        log_to_wandb(loss, np.array(0.), ce_qf, ce_qF, predicted_z, smoothed_true_params['smoothed_means'], options)
+        log_to_wandb(loss, kl_qp, log_f_over_F, LDRE_loss, predicted_z, smoothed_true_params['smoothed_means'], options)
 
         # from matplotlib import pyplot as plt
         # import seaborn as sns

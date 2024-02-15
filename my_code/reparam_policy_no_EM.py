@@ -378,7 +378,7 @@ def get_posterior(params, prior_params, opt_states, y, u, RPM_constant):
 
     return smoothed, emission_potentials
 
-def get_free_energy(params, opt_states, y, key, options):
+def get_free_energy(params, opt_states, y, u, key, beta, options):
 
     RPM_constant, RPM = get_RPM_factors(params, opt_states, y, options)
 
@@ -423,7 +423,7 @@ def params_update(grads, opt_states):
 
 def train_step(params, opt_states, y, u, key, beta, options):
 
-    (loss, (kl_qp, ce_qf, ce_qF, smoothed)), grads = get_value_and_grad(params, opt_states, y, key, options)
+    (loss, (kl_qp, ce_qf, ce_qF, smoothed)), grads = get_value_and_grad(params, opt_states, y, u, key, beta, options)
     params, opt_states = params_update(grads, opt_states)
 
     return params, opt_states, loss, kl_qp, ce_qf, ce_qF, smoothed['smoothed_means']

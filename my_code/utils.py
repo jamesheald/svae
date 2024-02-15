@@ -56,6 +56,13 @@ def half_log_det(Sigma, diagonal_boost = 1e-9):
 
 batch_half_log_det = vmap(half_log_det)
 
+def sample_from_MVN(Sigma, key):
+
+    sqrt_Sigma = np.linalg.cholesky(Sigma)
+    x = sqrt_Sigma @ random.normal(key, (Sigma.shape[0],))
+
+    return x
+
 def construct_dynamics_matrix(u, v, s, dim, eps = 1e-3):
 
     U, _ = np.linalg.qr(u.reshape((dim, dim)))
@@ -163,6 +170,19 @@ def expected_log_F(mu_posterior, Sigma_posterior, rpm_mu, rpm_Sigma, key):
     return log_F
 
 batch_expected_log_F = vmap(expected_log_F, in_axes=(None,None,None,None,0))
+
+def expected_log_f_over_F(rpm_mu, rpm_Sigma, samples, batch_id):
+
+    log_f_prob = vmap(vmap(lambda m, S, x: MVN(loc=m, covariance_matrix=S).log_prob(x), in_axes=(0, 0, 0)), in_axes=(0, 0, None))(rpm_mu, rpm_Sigma, samples)
+    batch_size = rpm_mu.shape[0]
+    # mx = log_f_prob.max(axis=0)
+    # F_log_p = (mx + logsumexp(log_f_prob - mx, axis=0, b=1/batch_size)).sum()
+    log_f = log_f_prob[batch_id,:].sum()
+    log_F = logsumexp(log_f_prob, axis=0, b=1/batch_size).sum()
+
+    return log_f - log_F
+
+batch_expected_log_f_over_F = vmap(expected_log_f_over_F, in_axes=(None,None,0,0))
 
 def entropy(J):
 
