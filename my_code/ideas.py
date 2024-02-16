@@ -1,6 +1,11 @@
+# nonlinear u
+# cyclic beta
+
 # plot grad norm
 # specify network layer num
 # use parallel KF and add 'b' to it'
+
+# transformers instead of BiGRU
 
 # fix prior params to true values and try to learn RPM
 # represent A via SVD composition
@@ -28,3 +33,5 @@
 
 # add noise to prevent converging to local optimum by a) using MC sample for F, b) minibatches with data shuffled each epocjh
 # bigger batch size B to get more data to train neural networks
+
+# consider removing layernorm (or applying it more sparingly, if not getting great results)

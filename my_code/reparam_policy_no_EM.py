@@ -19,24 +19,7 @@ from functools import partial
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
 
-from functools import partial # pylint: disable=g-importing-member
-from typing import (
-  Any,
-  Callable,
-  Optional,
-  Tuple,
-)
-
-from flax.typing import (
-  PRNGKey,
-  Dtype,
-  Initializer,
-)
-
-from flax.linen import initializers
-from flax.linen.activation import sigmoid, tanh
-from flax.linen.linear import default_kernel_init, Dense
-from flax.linen.module import compact, nowrap
+from networks import GRUCell_LN
 
 class delta_q_params(nn.Module):
     carry_dim: int
@@ -44,9 +27,11 @@ class delta_q_params(nn.Module):
 
     def setup(self):
         
-        self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
+        # self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
+        self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
 
-        self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        # self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        self.dense = nn.Dense(self.z_dim*2)
 
     def __call__(self, y):
 
@@ -54,9 +39,13 @@ class delta_q_params(nn.Module):
 
             mu, var_output_flat = np.split(x, [self.z_dim])
 
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
 
-            J = psd_solve(Sigma, np.eye(self.z_dim))
+            Sigma = np.diag(np.exp(var_output_flat)+1e-6)
+
+            J = np.diag(1/np.exp(var_output_flat))
+
+            # J = psd_solve(Sigma, np.eye(self.z_dim))
             h = J @ mu
 
             return Sigma, mu, J, h
@@ -144,7 +133,8 @@ class GRU_RPM(nn.Module):
         self.LN_2 = nn.LayerNorm()
         self.dense_3 = nn.Dense(features=self.h_dim)
         self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        # self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        self.dense_4 = nn.Dense(features=2*self.z_dim)
 
     def __call__(self, y):
 
@@ -152,9 +142,11 @@ class GRU_RPM(nn.Module):
 
             mu, var_output_flat = np.split(x, [self.z_dim])
 
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+            Sigma = np.diag(np.exp(var_output_flat))
 
-            J = psd_solve(Sigma, np.eye(self.z_dim))
+            # J = psd_solve(Sigma, np.eye(self.z_dim))
+            J = np.diag(1/np.exp(var_output_flat))
             h = J @ mu
 
             return Sigma, mu, J, h
@@ -279,7 +271,8 @@ class rpm_network(nn.Module):
         self.LN_2 = nn.LayerNorm()
         self.dense_3 = nn.Dense(features=self.h_dim)
         self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        # self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+        self.dense_4 = nn.Dense(features=self.z_dim*2)
 
     def __call__(self, y):
 
@@ -295,8 +288,10 @@ class rpm_network(nn.Module):
 
             h, var_output_flat = np.split(x, [self.z_dim])
 
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-            J = psd_solve(Sigma, np.eye(self.z_dim))
+            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+            Sigma = np.diag(np.exp(var_output_flat))
+            # J = psd_solve(Sigma, np.eye(self.z_dim))
+            J = np.diag(1/np.exp(var_output_flat))
             mu = Sigma @ h
 
             return Sigma, mu, J, h
@@ -474,15 +469,15 @@ options['use_GRU_for_F_in_q'] = True
 options['f_time_dependent'] = False
 options['initialise_via_M_step'] = False
 options['num_MC_samples'] = 1
-options["beta_init_value"] = 1.
+options["beta_init_value"] = 0.
 options["beta_end_value"] = 1.
-options["beta_transition_begin"] = 4000
+options["beta_transition_begin"] = 1000
 options["beta_transition_steps"] = 1000
 options['fit_LDS'] = True
 options['save_dir'] = "/nfs/nhome/live/jheald/svae/my_code/runs"
 options['project_name'] = 'RPM-mycode'
 
-seed = 5
+seed = 0
 subkey1, subkey2, subkey3, subkey4, subkey5, subkey6, subkey7, key = random.split(random.PRNGKey(seed), 8)
 
 if options['fit_LDS']:
@@ -510,6 +505,7 @@ if options['normalise_y']:
 # RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
 RPM = GRU_RPM(carry_dim=carry_dim, h_dim=h_dim_rpm, z_dim=D, T=T)
 delta_q = delta_q_params(carry_dim=carry_dim, z_dim=D)
+# delta_q = rpm_network(h_dim=h_dim_rpm, z_dim=D)
 params = {}
 if options['f_time_dependent']:
     params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
@@ -566,6 +562,9 @@ for itr in pbar:
         R2 = 0.
 
     pbar.set_description("train loss: {:.3f},  kl_qp: {:.3f}, ce_qf: {:.3f}, ce_qF: {:.3f}, R2 train states: {:.3f}".format(loss, kl_qp.mean(), ce_qf.mean(), ce_qF.mean(), R2))
+
+    # prior_params = get_constrained_prior_params(params['prior_params'], U)
+    # smoothed = batch_perform_Kalman_smoothing(prior_params, emission_potentials, u)
 
     if itr % log_every == 0:
 

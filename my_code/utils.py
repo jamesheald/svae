@@ -63,6 +63,8 @@ def sample_from_MVN(Sigma, key):
 
     return x
 
+batch_sample_from_MVN = vmap(sample_from_MVN)
+
 def construct_dynamics_matrix(u, v, s, dim, eps = 1e-3):
 
     U, _ = np.linalg.qr(u.reshape((dim, dim)))
@@ -158,9 +160,12 @@ def kl_qp_natural_parameters(J_q, h_q, J_p, h_p):
 
 def expected_log_F(mu_posterior, Sigma_posterior, rpm_mu, rpm_Sigma, key):
 
-    MVN.reparameterization_type=tfd.FULLY_REPARAMETERIZED
+    # MVN.reparameterization_type=tfd.FULLY_REPARAMETERIZED
+    # samples = MVN(loc=mu_posterior, covariance_matrix=Sigma_posterior).sample(seed=key)
 
-    samples = MVN(loc=mu_posterior, covariance_matrix=Sigma_posterior).sample(seed=key)
+    keys = random.split(key, Sigma_posterior.shape[0])
+    samples = mu_posterior + batch_sample_from_MVN(Sigma_posterior, keys)
+
     log_f_prob = vmap(vmap(lambda m, S, x: MVN(loc=m, covariance_matrix=S).log_prob(x), in_axes=(0, 0, 0)), in_axes=(0, 0, None))(rpm_mu, rpm_Sigma, samples)
     batch_size = rpm_mu.shape[0]
     # mx = log_f_prob.max(axis=0)
@@ -311,7 +316,7 @@ def initialise_LDS_params(D, U, key, closed_form_M_Step):
     params = {}
     params['m1'] = np.zeros(D)
     # params['A'] = truncate_singular_values(random.normal(key_A_u, (D, D)) / np.sqrt(D))
-    params['A'] = np.eye(D)
+    params['A'] = np.eye(D) * 0.99
     # params['A_u'] = random.normal(key_A_u, (D, D))
     # params['A_v'] = random.normal(key_A_v, (D, D))
     # params['A_s'] = random.normal(key_A_s, (D,))
@@ -319,7 +324,7 @@ def initialise_LDS_params(D, U, key, closed_form_M_Step):
     #     params['B'] = np.zeros((D, U+1))
     # else:
     #     params['B'] = np.zeros((D, U)) # random.normal(key_m1, (D, U)) / np.sqrt(U)
-    params['B'] = np.zeros((D, U)) # random.normal(key_m1, (D, U)) / np.sqrt(U)
+    params['B'] = np.ones((D, U)) / np.sqrt(U) # random.normal(key_m1, (D, U)) / np.sqrt(U)
 
     if closed_form_M_Step:
         params['Q1'] = I
