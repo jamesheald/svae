@@ -28,6 +28,9 @@ import wandb
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import tensorflow as tf
+tf.config.set_visible_devices([], device_type = 'GPU')
+
 def get_scaler(scaler):
     
     scalers = {
@@ -290,17 +293,18 @@ def generate_LDS_params(D, U, key):
     params = {}
     params['m1'] = random.normal(key_m1, (D, ))
     params['Q1'] = construct_covariance_matrix(Q1_flat, D)
-    # params['A'] = truncate_singular_values(A_u / np.sqrt(D))
-    # params['A'] = construct_dynamics_matrix(A_u, A_v, A_s, D)
+
     params['A'] = random_rotation(key_A_u, D, theta=np.pi/20) # theta=np.pi/20
     params['B'] = random.normal(key_m1, (D, U)) / np.sqrt(U)
     params['Q'] = construct_covariance_matrix(Q1_flat, D)
+
     # params['Abar'] = construct_dynamics_matrix(Abar_u, Abar_v, Abar_s, D)
     # params['Abar'] = truncate_singular_values(Abar_u / np.sqrt(D))
     params['Abar'] = random_rotation(key_Abar_u, D, theta=np.pi/20) # theta=np.pi/20
     params['K'] = np.linalg.pinv(params['B']) @ (params['Abar'] - params['A'])
     params['l'] = random.normal(key_l, (U,))
     params['S'] = construct_covariance_matrix(S_flat, U)
+    
     params['C'] = random.normal(key_C, (D, D)) / np.sqrt(D)
     params['d'] = random.normal(key_d, (D,)) 
     params['R'] = construct_covariance_matrix(R_flat, D)
@@ -334,20 +338,6 @@ def initialise_LDS_params(D, U, key, closed_form_M_Step):
         params['Q_flat'] = I[np.tril_indices(D)]
         # params['Q1_flat'] = np.diag(I)
         # params['Q_flat'] = np.diag(I)
-
-    # params['m1_F'] = np.zeros(D)
-    # params['Q1_F_flat'] = I[np.tril_indices(D)]
-    # # params['A_F'] = truncate_singular_values(random.normal(key_A_F, (D, D)) / np.sqrt(D))
-    # params['A_F'] = np.eye(D)
-    # params['b_F'] = np.zeros(D)
-    # params['Q_F_flat'] = I[np.tril_indices(D)]
-    
-    # # # params['Abar_u'] = random.normal(key_Abar_u, (D, D))
-    # # # params['Abar_v'] = random.normal(key_Abar_v, (D, D))
-    # # # params['Abar_s'] = random.normal(key_Abar_s, (D,))
-    # # params['Abar'] = truncate_singular_values(random.normal(key_Abar_u, (D, D)) / np.sqrt(D))
-    # params['l'] = np.zeros(U)
-    # params['S_flat'] = I[np.tril_indices(U)]
 
     return params
 
@@ -413,15 +403,11 @@ def get_constrained_prior_params(params, U, eps=0.):
     # params['Q1_F'] = construct_covariance_matrix(params['Q1_F_flat'], D)
     params['Q'] = construct_covariance_matrix(params['Q_flat'], D)
     # params['Q'] = np.diag(np.exp(params['Q_flat'])+eps)
-    # params['Q_F'] = construct_covariance_matrix(params['Q_F_flat'], D)
 
     # params['Q'] = np.sqrt(0.1) * np.eye(D)
     # params['Q1'] = np.sqrt(0.1) * np.eye(D)
 
     # params['A'] = construct_dynamics_matrix(params['A_u'], params['A_v'], params['A_s'], D)
-    # params['Abar'] = construct_dynamics_matrix(params['Abar_u'], params['Abar_v'], params['Abar_s'], D)
-    # params['K'] = np.linalg.pinv(params['B']) @ (params['Abar'] - params['A'])
-    # params['S'] = construct_covariance_matrix(params['S_flat'], U)
 
     return params
 
@@ -625,18 +611,12 @@ def closed_form_LDS_updates(params, smoothed, u, mean_field_q):
     params["prior_params"]["A"] = AB[:, :D]
     params["prior_params"]["B"] = AB[:, D:]
     params["prior_params"]["Q"] = vmap(vmap(lambda Extt, Extnt, Ex_t, AB, u_t: Extt - AB @ np.vstack((Extnt, np.outer(u_t, Ex_t))), in_axes=(0,0,0,None,0)), in_axes=(0,0,0,None,0))(smoothed["expected_states_squared"][:, 1:, :, :], smoothed["smoothed_cross_covariances"], smoothed['smoothed_means'][:, 1:, :], AB, u[:, 1:, :]).mean(axis=(0,1))
-    
-    # # init_params["prior_params"]["K"] = np.einsum("...i, ...j->...ij", u, RPM['mu']).sum(axis=(0, 1)) @ psd_solve((RPM['Sigma'] + np.einsum("...i, ...j->...ij", RPM['mu'], RPM['mu'])).sum(axis=(0, 1)), np.eye())
-    # K = np.einsum("...i, ...j->...ij", u, smoothed['smoothed_means']).sum(axis=(0, 1)) @ psd_solve((smoothed["expected_states_squared"]).sum(axis=(0, 1)), np.eye(D))
-    # params["prior_params"]["Abar"] = params["prior_params"]["A"] - params["prior_params"]["B"] @ K
-    # params["prior_params"]["S"] = vmap(vmap(lambda u, K, Ex: np.outer(u, u) - K @ np.outer(Ex, u), in_axes=(0,None,0)), in_axes=(0,None,0))(u, K, smoothed['smoothed_means']).mean()
 
     params["prior_params"]["m1"] = smoothed['smoothed_means'][:, 0, :].mean(axis=(0,))
     mu_diff = smoothed['smoothed_means'][:, 0, :] - params["prior_params"]["m1"]
     params["prior_params"]["Q1"] = smoothed["smoothed_covariances"][:, 0, :, :].mean(axis=(0,)) + np.einsum("jk,jl->jkl", mu_diff, mu_diff).mean(axis = 0)
 
     # params["prior_params"]["A"] = truncate_singular_values(params["prior_params"]["A"])
-    # # params["prior_params"]["Abar"] = truncate_singular_values(params["prior_params"]["Abar"])
 
     # params["prior_params"]["Q"] = (params["prior_params"]["Q"] + params["prior_params"]["Q"].T)/2
     # params["prior_params"]["Q"] += np.eye(D) * 1e-6
@@ -830,9 +810,69 @@ def dynamics_to_tridiag(prior_params, T):
     
     return { "J": J, "L": L}
 
+def sample_next_z_prior(carry, inputs):
+
+    z, p = carry
+    u, key = inputs
+
+    z = p['A'] @ z + p['B'] @ u + sample_from_MVN(p['Q'], key)
+
+    carry = z, p
+    outputs = z
+
+    return carry, outputs
+
+def get_prior_samples(p, u, key):
+
+    subkey, key = random.split(key)
+    z0 = p['m1'] + sample_from_MVN(p['Q1'], subkey)
+
+    carry = z0, p
+    keys = random.split(key, u.shape[0]-1)
+    inputs = u[:-1,:], keys
+    _, z = scan(sample_next_z_prior, carry, inputs)
+
+    return np.concatenate((z0[None], z))
+
+batch_get_prior_samples = vmap(get_prior_samples, in_axes=(None,0,0))
+
 def get_beta_schedule(options):
 
     return optax.linear_schedule(options["beta_init_value"], options["beta_end_value"], options["beta_transition_steps"], options["beta_transition_begin"])
+
+def transform_train_dataset(dataset, batch_size, tfds_seed):
+    
+    dataset = dataset.cache()
+    dataset = dataset.shuffle(tf.data.experimental.cardinality(dataset).numpy(), seed = tfds_seed, reshuffle_each_iteration = True)
+    dataset = dataset.batch(batch_size, drop_remainder = True)
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    
+    return dataset
+
+def transform_validate_dataset(dataset, batch_size):
+    
+    dataset = dataset.cache()
+    dataset = dataset.batch(batch_size, drop_remainder = True)
+    # dataset = dataset.batch(tf.data.experimental.cardinality(dataset).numpy())
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    # dataset = np.array(list(dataset)[0]['image'])
+    
+    return dataset
+
+def create_tf_dataset(y, u, options):
+
+    full_train_set = tf.data.Dataset.from_tensor_slices((y, u))
+    n_data = tf.data.experimental.cardinality(full_train_set).numpy()
+    n_data_validate = tf.cast(n_data * (options['fraction_for_validation']), tf.int64)
+    n_data_train = tf.cast(n_data * (1 - options['fraction_for_validation']), tf.int64)
+        
+    train_dataset = full_train_set.take(n_data_train)
+    validate_dataset = full_train_set.skip(n_data_train).take(n_data_validate)
+
+    train_dataset = transform_train_dataset(train_dataset, options['batch_size_train'], options['tf_data_seed'])
+    validate_dataset = transform_validate_dataset(validate_dataset, options['batch_size_validate'])
+
+    return train_dataset, validate_dataset
 
 def get_group_name(options):
 
@@ -841,34 +881,12 @@ def get_group_name(options):
     else:
         embed_u_str = "_NoEmbedU"
 
-    if options['use_LDS_for_F_in_q']:
-        LDS_for_F_str = "_LDSForF"
-    else:
-        LDS_for_F_str = "_NoLDSForF"
-
-    if options['use_GRU_for_F_in_q']:
-        GRU_for_F_str = "_GRUForF"
-    else:
-        GRU_for_F_str = "_NoGRUForF"
-
-    # if options['use_policy_loss']:
-    #     policy_loss_str = "_PolicyLoss"
-    # else:
-    #     policy_loss_str = "_NoPolicyLoss"
-    policy_loss_str = "_NoPolicyLoss"
-
-    # if options['explicitly_integrate_out_u']:
-    #     explicitly_integrate_out_u_str = "_ExplicitlyIntegrateOutU"
-    # else:
-    #     explicitly_integrate_out_u_str = "_NoExplicitlyIntegrateOutU"
-    explicitly_integrate_out_u_str = "_NoExplicitlyIntegrateOutU"
-
     if options['f_time_dependent']:
         f_time_dependent_str = "_FTimeDepend"
     else:
         f_time_dependent_str = "_NoFTimeDepend"
 
-    group_name = embed_u_str + LDS_for_F_str + GRU_for_F_str + policy_loss_str + explicitly_integrate_out_u_str + f_time_dependent_str
+    group_name = embed_u_str + f_time_dependent_str
 
     return group_name
 

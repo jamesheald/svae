@@ -160,89 +160,42 @@ class GRUCell_LN(nn.RNNCellBase):
     def num_feature_axes(self) -> int:
         return 1
 
-class sample_from_q(nn.Module):
-    h_dim: int
-    z_dim: int
-
-    def setup(self):
-        
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim)
-
-    def __call__(self, carry, inputs):
-
-        # sample from q(z_t | z_{t-1}, u_{t-1}, y_{t:T}), where y_{t:T} is represented by y_embed
-        # first time point should really be sampled from q(z_0 | y_{0:T}) 
-
-        z_prev = carry
-        u_prev, y_embed, key = inputs
-
-        epsilon = random.normal(key, z_prev.shape)
-
-        x = self.LN_1(self.dense_1(np.concatenate((z_prev, u_prev, y_embed, epsilon))))
-        x = nn.relu(x)
-        x = self.LN_2(self.dense_2(x))
-        x = nn.relu(x)
-        x = self.LN_3(self.dense_3(x))
-        x = nn.relu(x)
-        z = self.dense_4(x)
-
-        carry = z
-        outputs = z
-
-        return carry, outputs
-
 class implicit_q(nn.Module):
     carry_dim: int
-    h_dim: int
     z_dim: int
 
     def setup(self):
         
-        self.GRU = nn.RNN(GRUCell_LN(self.carry_dim))
+        self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
 
-        self.carry_init = self.param('carry_init', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
+        self.carry_init_forward = self.param('carry_init_forward', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
+        self.carry_init_backward = self.param('carry_init_backward', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
 
-        scanner = nn.scan(sample_from_q, variable_broadcast = 'params', split_rngs = {"params": False})
-        self.sampler = scanner(h_dim=self.h_dim, z_dim=self.z_dim)
+        self.dense = nn.Dense(self.z_dim)
 
     def __call__(self, y, u, key):
 
         noise = random.normal(key, y.shape)
 
-        y_embed = self.GRU(y, reverse=True, keep_order=True, initial_carry=self.carry_init)
+        concatenated_carry = self.BiGRU(np.concatenate((y, u, noise), axis=1), initial_carry=(self.carry_init_forward, self.carry_init_backward))
 
-        # dummy variables for first time point
-        z_prev = np.zeros(self.z_dim)
-        u_prev = np.zeros(u.shape[-1])
-        
-        carry = z_prev
-        keys = random.split(key, u.shape[0])
-        inputs = np.vstack((u_prev, u[:-1,:])), y_embed, keys
-        _, z = self.sampler(carry, inputs)
+        z = self.dense(concatenated_carry)
 
-        return z, y_embed
+        return z
 
 class discriminate(nn.Module):
     h_dim: int
 
     @nn.compact
-    def __call__(self, z, z_prev, u_prev, y_embed):
+    def __call__(self, x):
 
-        x = nn.LayerNorm()(nn.Dense(features = self.h_dim)(np.concatenate((z, z_prev, u_prev, y_embed), axis=2)))
-        x = nn.relu(x)
         x = nn.LayerNorm()(nn.Dense(features = self.h_dim)(x))
         x = nn.relu(x)
         x = nn.LayerNorm()(nn.Dense(features = self.h_dim)(x))
         x = nn.relu(x)
         x = nn.Dense(features = 1)(x)
 
-        return x.squeeze()
+        return x
 
 class estimate_log_density_ratio(nn.Module):
     h_dim: int
@@ -251,26 +204,21 @@ class estimate_log_density_ratio(nn.Module):
 
         None
 
-    def __call__(self, z_p, z_q, y_embed, u, state):
+    def __call__(self, z_p, z_q, y, u, state):
 
-        def bernoulli_logarithmic_loss(params, z_p, z_q, y_embed, u, state):
+        def bernoulli_logarithmic_loss(params, z_p, z_q, y, u, state):
 
-            # dummy variables for first time point
-            B, D, U = y.shape[0], y.shape[-1], u.shape[-1]
-            z_p_prev = np.concatenate((np.zeros((B,1,D)),z_p[:,:-1,:]),axis=1)
-            z_q_prev = np.concatenate((np.zeros((B,1,D)),z_q[:,:-1,:]),axis=1)
-            u_prev = np.concatenate((np.zeros((B,1,U)),u[:,:-1,:]),axis=1)
+            # estimate of the log density ratio, log q(tau_z_0 | tau_0) - log p(tau_z_0), given a sample of tau_z_0 from p(tau_z_0)
+            log_density_ratio_prior_sample = state.apply_fn(params, np.concatenate((z_p, y, u), axis = 1))
 
-            log_density_ratio_prior_sample = state.apply_fn(params, z_p, z_p_prev, u_prev, y_embed)
-
-            log_density_ratio_posterior_sample = state.apply_fn(params, z_q, z_q_prev, u_prev, y_embed)
+            # estimate of the log density ratio, log q(tau_z_0 | tau_0) - log p(tau_z_0), given a sample of tau_z_0 from q(tau_z_0 | tau_0)
+            log_density_ratio_posterior_sample = state.apply_fn(params, np.concatenate((z_q, y, u), axis = 1))
 
             # loss to train the log density ratio estimator
-            # learn log p(z_t | z_{t-1}, u_{t-1}) - log q(z_t | z_{t-1}, u_{t-1}, y_{t:T})
+            # loss = np.log(nn.sigmoid(log_density_ratio_posterior_sample)) + np.log(1 - nn.sigmoid(log_density_ratio_prior_sample))
             loss = - nn.log_sigmoid(log_density_ratio_posterior_sample) - nn.log_sigmoid(-log_density_ratio_prior_sample)
 
-            return loss.mean(), log_density_ratio_posterior_sample.sum(-1) 
-            # return loss[:,1:].sum(-1).mean(), log_density_ratio_posterior_sample[:,1:].sum(-1) # ignore first time point
+            return loss.mean(), log_density_ratio_posterior_sample 
 
             # logits = np.concatenate((log_density_ratio_posterior_sample,log_density_ratio_prior_sample))
             # labels = np.concatenate((np.ones(B), np.zeros(B)))
@@ -281,11 +229,9 @@ class estimate_log_density_ratio(nn.Module):
         loss_grad = value_and_grad(bernoulli_logarithmic_loss, has_aux = True)
 
         batch_size = y.shape[0]
-        (loss, log_density_ratio_posterior_sample), grads = loss_grad(state.params, z_p, z_q, y_embed, u, state)
+        (loss, log_density_ratio_posterior_sample), grads = loss_grad(state.params, z_p.reshape(batch_size, -1), z_q.reshape(batch_size, -1), y.reshape(batch_size, -1), u.reshape(batch_size, -1), state)
 
         state = state.apply_gradients(grads = grads)
-
-        loss, log_density_ratio_posterior_sample = bernoulli_logarithmic_loss(state.params, z_p, z_q, y_embed, u, state)
 
         # batch_size = y.shape[0]
         # loss, log_density_ratio_posterior_sample = bernoulli_logarithmic_loss(z_p.reshape(batch_size, -1), z_q.reshape(batch_size, -1), y.reshape(batch_size, -1), u.reshape(batch_size, -1))
@@ -600,11 +546,11 @@ def get_posterior_samples(params, opt_states, y, u, key):
 
     B = u.shape[0]
     keys = random.split(key, B)
-    z, y_embed = vmap(q_sample_opt.apply_fn, in_axes=(None,0,0,0))(params["q_sample_params"], y, u, keys)
+    z = vmap(q_sample_opt.apply_fn, in_axes=(None,0,0,0))(params["q_sample_params"], y, u, keys)
 
-    return z, y_embed
+    return z
 
-def sample_next_z(carry, inputs):
+def sample_next_z_prior(carry, inputs):
 
     z, p = carry
     u, key = inputs
@@ -624,7 +570,7 @@ def get_prior_samples(p, u, key):
     carry = z0, p
     keys = random.split(key, u.shape[0]-1)
     inputs = u[:-1,:], keys
-    _, z = scan(sample_next_z, carry, inputs)
+    _, z = scan(sample_next_z_prior, carry, inputs)
 
     return np.concatenate((z0[None], z))
 
@@ -638,7 +584,7 @@ def get_free_energy(params, LDRE, opt_states, y, u, beta, key, options):
     prior_params = get_constrained_prior_params(params['prior_params'], U)
 
     subkey1, subkey2, key = random.split(key, 3)
-    z_q, y_embed = get_posterior_samples(params, opt_states, y, u, subkey1)
+    z_q = get_posterior_samples(params, opt_states, y, u, subkey1)
 
     B = u.shape[0]
     keys = random.split(subkey2, B)
@@ -646,7 +592,7 @@ def get_free_energy(params, LDRE, opt_states, y, u, beta, key, options):
 
     _, _, _, _, _, LDRE_opt_state, _ = opt_states
 
-    kl_qp, LDRE_loss, LDRE_opt_state = LDRE(z_p, z_q, y_embed, u, LDRE_opt_state)
+    kl_qp, LDRE_loss, LDRE_opt_state = LDRE(z_p, z_q, y, u, LDRE_opt_state)
 
     log_f_over_F = batch_expected_log_f_over_F(RPM['mu'], RPM['Sigma'], z_q, np.arange(B))
     T_log_B = T * np.log(B)
@@ -729,11 +675,10 @@ D = 2
 U = 1
 h_dim_rpm = 50
 h_dim_LDRE = 50
-h_dim_gen = 50
 h_dim_u_emb = 50
 carry_dim = 50
-prior_lr = 1e-2
-learning_rate = 1e-2
+prior_lr = 1e-3
+learning_rate = 1e-3
 max_grad_norm = 10
 n_epochs = 5000
 log_every = 250
@@ -806,11 +751,11 @@ F_approx = F_for_q(carry_dim=carry_dim, z_dim=D, T=T)
 params["F_approx_params"] = F_approx.init(rngs = {'params': subkey6})
 
 discriminator = discriminate(h_dim=h_dim_LDRE)
-params["LDRE_params"] = discriminator.init(z=np.ones((B,T,D)), z_prev=np.ones((B,T,D)), u_prev=np.ones((B,T,U)), y_embed=np.ones((B,T,carry_dim)), rngs = {'params': subkey8})
+params["LDRE_params"] = discriminator.init(x = np.ones((T * (D+D+U))), rngs = {'params': subkey8})
 
 LDRE = estimate_log_density_ratio(h_dim=h_dim_LDRE)
 
-q_sample = implicit_q(carry_dim=carry_dim, z_dim=D, h_dim=h_dim_gen)
+q_sample = implicit_q(carry_dim=carry_dim, z_dim=D)
 params["q_sample_params"] = q_sample.init(y = np.ones((T,D)), u = np.ones((T,U)), key = random.PRNGKey(0), rngs = {'params': subkey9})
 
 rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))

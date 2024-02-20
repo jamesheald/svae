@@ -19,428 +19,7 @@ from functools import partial
 import tensorflow_probability.substrates.jax.distributions as tfd
 MVN = tfd.MultivariateNormalFullCovariance
 
-from functools import partial # pylint: disable=g-importing-member
-from typing import (
-  Any,
-  Callable,
-  Optional,
-  Tuple,
-)
-
-from flax.typing import (
-  PRNGKey,
-  Dtype,
-  Initializer,
-)
-
-from flax.linen import initializers
-from flax.linen.activation import sigmoid, tanh
-from flax.linen.linear import default_kernel_init, Dense
-from flax.linen.module import compact, nowrap
-
-class GRUCell_LN(nn.RNNCellBase):
-    r"""GRU cell.
-
-    The mathematical definition of the cell is as follows
-
-    .. math::
-
-      \begin{array}{ll}
-      r = \sigma(W_{ir} x + b_{ir} + W_{hr} h) \\
-      z = \sigma(W_{iz} x + b_{iz} + W_{hz} h) \\
-      n = \tanh(W_{in} x + b_{in} + r * (W_{hn} h + b_{hn})) \\
-      h' = (1 - z) * n + z * h \\
-      \end{array}
-
-    where x is the input and h, is the output of the previous time step.
-
-    Example usage::
-
-    >>> import flax.linen as nn
-    >>> import jax, jax.numpy as jnp
-
-    >>> x = jax.random.normal(jax.random.key(0), (2, 3))
-    >>> layer = nn.GRUCell(features=4)
-    >>> carry = layer.initialize_carry(jax.random.key(1), x.shape)
-    >>> variables = layer.init(jax.random.key(2), carry, x)
-    >>> new_carry, out = layer.apply(variables, carry, x)
-
-    Attributes:
-    features: number of output features.
-    gate_fn: activation function used for gates (default: sigmoid).
-    activation_fn: activation function used for output and memory update
-      (default: tanh).
-    kernel_init: initializer function for the kernels that transform
-      the input (default: lecun_normal).
-    recurrent_kernel_init: initializer function for the kernels that transform
-      the hidden state (default: initializers.orthogonal()).
-    bias_init: initializer for the bias parameters (default: initializers.zeros_init())
-    dtype: the dtype of the computation (default: None).
-    param_dtype: the dtype passed to parameter initializers (default: float32).
-    """
-
-    features: int
-    gate_fn: Callable[..., Any] = sigmoid
-    activation_fn: Callable[..., Any] = tanh
-    kernel_init: Initializer = default_kernel_init
-    recurrent_kernel_init: Initializer = initializers.orthogonal()
-    bias_init: Initializer = initializers.zeros_init()
-    dtype: Optional[Dtype] = None
-    param_dtype: Dtype = np.float32
-    carry_init: Initializer = initializers.zeros_init()
-
-    @compact
-    def __call__(self, carry, inputs):
-        """Gated recurrent unit (GRU) cell.
-
-        Args:
-          carry: the hidden state of the GRU cell,
-            initialized using ``GRUCell.initialize_carry``.
-          inputs: an ndarray with the input for the current time step.
-            All dimensions except the final are considered batch dimensions.
-
-        Returns:
-          A tuple with the new carry and the output.
-        """
-        h = carry
-        hidden_features = h.shape[-1]
-        # input and recurrent layers are summed so only one needs a bias.
-        dense_h = partial(
-          Dense,
-          features=hidden_features,
-          use_bias=False,
-          dtype=self.dtype,
-          param_dtype=self.param_dtype,
-          kernel_init=self.recurrent_kernel_init,
-          bias_init=self.bias_init,
-        )
-        dense_i = partial(
-          Dense,
-          features=hidden_features,
-          use_bias=True,
-          dtype=self.dtype,
-          param_dtype=self.param_dtype,
-          kernel_init=self.kernel_init,
-          bias_init=self.bias_init,
-        )
-
-        # r = self.gate_fn(dense_i(name='ir')(inputs) + dense_h(name='hr')(h))
-        # z = self.gate_fn(dense_i(name='iz')(inputs) + dense_h(name='hz')(h))
-        # # add bias because the linear transformations aren't directly summed.
-        # n = self.activation_fn(
-        #   dense_i(name='in')(inputs) + r * dense_h(name='hn', use_bias=True)(h)
-        # )
-
-        r = self.gate_fn(nn.LayerNorm()(dense_i(name='ir')(inputs)) + nn.LayerNorm()(dense_h(name='hr')(h)))
-        z = self.gate_fn(nn.LayerNorm()(dense_i(name='iz')(inputs)) + nn.LayerNorm()(dense_h(name='hz')(h)))
-        # add bias because the linear transformations aren't directly summed.
-        n = self.activation_fn(
-          nn.LayerNorm()(dense_i(name='in')(inputs)) + r * nn.LayerNorm()(dense_h(name='hn', use_bias=True)(h))
-          )
-
-        new_h = (1.0 - z) * n + z * h
-        return new_h, new_h
-
-    @nowrap
-    def initialize_carry(self, rng: PRNGKey, input_shape: Tuple[int, ...]):
-        """Initialize the RNN cell carry.
-
-        Args:
-          rng: random number generator passed to the init_fn.
-          input_shape: a tuple providing the shape of the input to the cell.
-
-        Returns:
-          An initialized carry for the given RNN cell.
-        """
-        batch_dims = input_shape[:-1]
-        mem_shape = batch_dims + (self.features,)
-        return self.carry_init(rng, mem_shape, self.param_dtype)
-
-    @property
-    def num_feature_axes(self) -> int:
-        return 1
-
-# class GRU_Cell(nn.Module):
-#     carry_dim: int
-    
-#     @nn.compact
-#     def __call__(self, inputs, carry=None):
-        
-#         if carry is None:
-            
-#             # learnable initial carry
-#             carry = self.param('carry_init', lambda rng, shape: np.zeros(shape), (self.carry_dim,))
-        
-#         # x = nn.LayerNorm()(y)
-#         # https://arxiv.org/pdf/1607.06450.pdf
-#         # https://github.com/ElektrischesSchaf/LayerNorm_GRU
-#         carry, outputs = nn.GRUCell()(carry, inputs)
-        
-#         return carry, outputs
-
-class delta_q_params(nn.Module):
-    carry_dim: int
-    z_dim: int
-
-    def setup(self):
-        
-        self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
-        # self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell_LN(self.carry_dim)), nn.RNN(nn.GRUCell_LN(self.carry_dim)))
-
-        self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-
-    def __call__(self, y):
-
-        def get_natural_parameters(x):
-
-            mu, var_output_flat = np.split(x, [self.z_dim])
-
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-
-            J = psd_solve(Sigma, np.eye(self.z_dim))
-            h = J @ mu
-
-            return Sigma, mu, J, h
-
-        concatenated_carry = self.BiGRU(y)
-
-        out = self.dense(concatenated_carry)
-
-        Sigma, mu, J, h = vmap(get_natural_parameters)(out)
-
-        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
-
-class GRUCell_LN_NoInput(nn.RNNCellBase):
-
-    features: int
-    gate_fn: Callable[..., Any] = sigmoid
-    activation_fn: Callable[..., Any] = tanh
-    kernel_init: Initializer = default_kernel_init
-    recurrent_kernel_init: Initializer = initializers.orthogonal()
-    bias_init: Initializer = initializers.zeros_init()
-    dtype: Optional[Dtype] = None
-    param_dtype: Dtype = np.float32
-    carry_init: Initializer = initializers.zeros_init()
-
-    @compact
-    def __call__(self, carry, inputs):
-
-        h = carry
-        hidden_features = h.shape[-1]
-        # input and recurrent layers are summed so only one needs a bias.
-        dense_h = partial(
-          Dense,
-          features=hidden_features,
-          use_bias=True,
-          dtype=self.dtype,
-          param_dtype=self.param_dtype,
-          kernel_init=self.recurrent_kernel_init,
-          bias_init=self.bias_init,
-        )
-
-        r = self.gate_fn(nn.LayerNorm()(dense_h(name='hr')(h)))
-        z = self.gate_fn(nn.LayerNorm()(dense_h(name='hz')(h)))
-        n = self.activation_fn(r * nn.LayerNorm()(dense_h(name='hn')(h))
-          )
-
-        new_h = (1.0 - z) * n + z * h
-        return new_h, new_h
-
-    @nowrap
-    def initialize_carry(self, rng: PRNGKey, input_shape: Tuple[int, ...]):
-        """Initialize the RNN cell carry.
-
-        Args:
-          rng: random number generator passed to the init_fn.
-          input_shape: a tuple providing the shape of the input to the cell.
-
-        Returns:
-          An initialized carry for the given RNN cell.
-        """
-        batch_dims = input_shape[:-1]
-        mem_shape = batch_dims + (self.features,)
-        return self.carry_init(rng, mem_shape, self.param_dtype)
-
-    @property
-    def num_feature_axes(self) -> int:
-        return 1
-
-class F_for_q(nn.Module):
-    carry_dim: int
-    z_dim: int
-    T: int
-
-    def setup(self):
-        
-        self.GRU = nn.RNN(GRUCell_LN_NoInput(self.carry_dim))
-        # self.GRU = nn.RNN(nn.GRUCell(self.carry_dim))
-
-        self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
-
-        self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-
-    def __call__(self):
-
-        def get_natural_parameters(x):
-
-            mu, var_output_flat = np.split(x, [self.z_dim])
-
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-
-            J = psd_solve(Sigma, np.eye(self.z_dim))
-            h = J @ mu
-
-            return Sigma, mu, J, h
-
-        carry = self.GRU(np.zeros((self.T,1)) ,initial_carry=self.carry_init)
-
-        out = self.dense(carry)
-
-        Sigma, mu, J, h = vmap(get_natural_parameters)(out)
-
-        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
-        # def get_natural_parameters(x):
-
-        #     h, var_output_flat = np.split(x, [self.z_dim])
-
-        #     J = construct_precision_matrix(var_output_flat, self.z_dim)
-
-        #     return J, h
-
-        # carry = self.GRU(np.zeros((self.T,1)) ,initial_carry=self.carry_init)
-
-        # out = self.dense(carry)
-
-        # J, h = vmap(get_natural_parameters)(out)
-
-        # return {'J': J, 'h': h}
-
-class control_network(nn.Module):
-    u_emb_dim: int
-    h_dim: int
-
-    def setup(self):
-
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.dense_4 = nn.Dense(features=self.u_emb_dim)
-
-    def __call__(self, u):
-
-        def embed_u(u):
-
-            # x = nn.LayerNorm()(y)
-             # x = self.dense_1(x)
-            x = self.dense_1(u)
-            x = nn.relu(x)
-            x = self.dense_2(x)
-            x = nn.relu(x)
-            x = self.dense_3(x)
-            x = nn.relu(x)
-            x = self.dense_4(x)
-
-            return x
-
-        if u.ndim == 1:
-            x = embed_u(u)
-        elif u.ndim == 2:
-            x = vmap(embed_u)(u)
-        elif u.ndim == 3:
-            x = vmap(vmap(embed_u))(u)
-
-        return x
-
-class rpm_network(nn.Module):
-    z_dim: int
-    h_dim: int
-
-    def setup(self):
-
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-
-    def __call__(self, y):
-
-        def get_natural_parameters(y):
-
-            x = self.LN_1(self.dense_1(y))
-            x = nn.relu(x)
-            x = self.LN_2(self.dense_2(x))
-            x = nn.relu(x)
-            x = self.LN_3(self.dense_3(x))
-            x = nn.relu(x)
-            x = self.dense_4(x)
-
-            h, var_output_flat = np.split(x, [self.z_dim])
-
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-            J = psd_solve(Sigma, np.eye(self.z_dim))
-            mu = Sigma @ h
-
-            return Sigma, mu, J, h
-
-        if y.ndim == 1:
-            Sigma, mu, J, h = get_natural_parameters(y)
-        elif y.ndim == 2:
-            Sigma, mu, J, h = vmap(get_natural_parameters)(y)
-        elif y.ndim == 3:
-            Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(y)
-
-        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
-
-class GRU_RPM(nn.Module):
-    carry_dim: int
-    h_dim: int
-    z_dim: int
-    T: int
-
-    def setup(self):
-        
-        self.GRU = nn.RNN(GRUCell_LN_NoInput(self.carry_dim))
-        # self.GRU = nn.RNN(nn.GRUCell(self.carry_dim))
-
-        self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
-
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-
-    def __call__(self, y):
-
-        def get_natural_parameters(x):
-
-            mu, var_output_flat = np.split(x, [self.z_dim])
-
-            Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-
-            J = psd_solve(Sigma, np.eye(self.z_dim))
-            h = J @ mu
-
-            return Sigma, mu, J, h
-
-        carry = self.GRU(np.zeros((self.T,1)), initial_carry=self.carry_init)
-
-        x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(y.shape[0], axis=0), y), axis=2)))
-        x = nn.relu(x)
-        x = self.LN_2(self.dense_2(x))
-        x = nn.relu(x)
-        x = self.LN_3(self.dense_3(x))
-        x = nn.relu(x)
-        x = self.dense_4(x)
-
-        Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
-
-        return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
+from networks import control_network, GRU_RPM, delta_q_params
 
 def compute_free_energy_E_step(prior_params, prior_JL, J_RPM, mu_RPM, Sigma_RPM, smoothed, emission_potentials, u, key, batch_id, options):
 
@@ -490,7 +69,7 @@ def compute_free_energy_M_step(J_RPM, mu_RPM, Sigma_RPM, smoothed, key, batch_id
 
 def get_RPM_factors(params, opt_states, y, options):
 
-    rpm_opt_state, _, _, _, F_approx_opt_state = opt_states
+    _, _, _, F_approx_opt_state = opt_states
 
     # RPM_constant = rpm_opt_state.apply_fn(params["rpm_params"], y)
 
@@ -517,7 +96,7 @@ def get_RPM_factors(params, opt_states, y, options):
 
 def get_posterior(params, prior_params, opt_states, y, u, RPM_constant):
 
-    _, delta_q_opt, _, _, _ = opt_states
+    delta_q_opt, _, _, _ = opt_states
 
     # delta_q_potentials = vmap(delta_q_opt.apply_fn, in_axes=(None,0))(params["delta_q_params"], y)
 
@@ -609,38 +188,34 @@ def M_step(params, opt_states, y, u, smoothed, key, options):
 
 def params_update_M_step(grads, opt_states):
     
-    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
+    delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
 
-    rpm_opt_state = rpm_opt_state.apply_gradients(grads = grads["rpm_params"])
 
     prior_opt_state = prior_opt_state.apply_gradients(grads = grads["prior_params"])
-    # prior_opt_state.params["A_F"] = truncate_singular_values(prior_opt_state.params["A_F"])
 
     F_approx_opt_state = F_approx_opt_state.apply_gradients(grads = grads["F_approx_params"])
 
     params = {}
-    params["rpm_params"] = rpm_opt_state.params
     params["delta_q_params"] = delta_q_opt.params
     params["prior_params"] = prior_opt_state.params
     params["u_emb_params"] = control_state.params
     params["F_approx_params"] = F_approx_opt_state.params
 
-    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
+    return params, [delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
 
 def params_update_E_step(grads, opt_states):
     
-    rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
+    delta_q_opt, prior_opt_state, control_state, F_approx_opt_state = opt_states
 
     delta_q_opt = delta_q_opt.apply_gradients(grads = grads["delta_q_params"])
 
     params = {}
-    params["rpm_params"] = rpm_opt_state.params
     params["delta_q_params"] = delta_q_opt.params
     params["prior_params"] = prior_opt_state.params
     params["u_emb_params"] = control_state.params
     params["F_approx_params"] = F_approx_opt_state.params
 
-    return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
+    return params, [delta_q_opt, prior_opt_state, control_state, F_approx_opt_state]
 
 def train_step(params, opt_states, y, u, key, beta, options):
 
@@ -661,8 +236,7 @@ def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=
 
     options = CheckpointManagerOptions(max_to_keep=3, best_fn=lambda metrics: metrics, best_mode='min')
     mngr = CheckpointManager(ckpt_metrics_dir,  
-                             {'rpm_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
-                              'delta_q_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
+                             {'delta_q_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
                               'prior_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
                               'u_emb_model_state': AsyncCheckpointer(PyTreeCheckpointHandler()),
                               'F_approx_model_state': AsyncCheckpointer(PyTreeCheckpointHandler())},
@@ -675,7 +249,7 @@ def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=
         
     return states, mngr
 
-B = 50
+B = 250
 T = 100
 D = 2
 U = 1
@@ -691,25 +265,20 @@ log_every = 250
 options = {}
 options['normalise_y'] = True
 options['embed_u'] = False
-options['use_LDS_for_F_in_q'] = False
-# options['explicitly_integrate_out_u'] = True
-options['use_GRU_for_F_in_q'] = True
-# options['use_MM_for_F_in_q'] = False
-# options['use_policy_loss'] = False
 options['f_time_dependent'] = False
 options['initialise_via_M_step'] = False
 options['num_MC_samples'] = 1
-options['num_E_steps'] = 100
+options['num_E_steps'] = 10
 options['num_M_steps'] = 1
-options["beta_init_value"] = 1.
+options["beta_init_value"] = 0.
 options["beta_end_value"] = 1.
-options["beta_transition_begin"] = 4000
-options["beta_transition_steps"] = 1000
+options["beta_transition_begin"] = 100
+options["beta_transition_steps"] = 100
 options['fit_LDS'] = True
 options['save_dir'] = "/nfs/nhome/live/jheald/svae/my_code/runs"
 options['project_name'] = 'RPM-mycode'
 
-seed = 5
+seed = 0
 subkey1, subkey2, subkey3, subkey4, subkey5, subkey6, subkey7, key = random.split(random.PRNGKey(seed), 8)
 
 if options['fit_LDS']:
@@ -734,15 +303,12 @@ if options['normalise_y']:
 
     y = scale_y(y)
 
-RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
 delta_q = delta_q_params(carry_dim=carry_dim, z_dim=D)
 # delta_q = rpm_network(z_dim=D, h_dim=h_dim_rpm)
 params = {}
 if options['f_time_dependent']:
-    params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D+1)), rngs = {'params': subkey7})
 else:
-    params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D,)), rngs = {'params': subkey7})
 
 if options['initialise_via_M_step']:
@@ -758,15 +324,14 @@ params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5
 F_approx = GRU_RPM(carry_dim=carry_dim, h_dim=h_dim_rpm, z_dim=D, T=T)
 params["F_approx_params"] = F_approx.init(y = np.zeros((B,T,D)),rngs = {'params': subkey6})
 
-rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 delta_q_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
 u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 F_approx_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 
-all_optimisers = (rpm_opt, delta_q_opt, prior_opt, u_emb_opt, F_approx_opt)
-all_params = (params["rpm_params"], params["delta_q_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"])
-all_models = (RPM, delta_q, RPM, u_emb, F_approx)
+all_optimisers = (delta_q_opt, prior_opt, u_emb_opt, F_approx_opt)
+all_params = (params["delta_q_params"], params["prior_params"], params["u_emb_params"], params["F_approx_params"])
+all_models = (delta_q, F_approx, u_emb, F_approx)
 opt_states, mngr = get_train_state(options['save_dir'], all_models, all_optimisers, all_params)
 
 beta_schedule = get_beta_schedule(options)
