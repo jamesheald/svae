@@ -835,20 +835,20 @@ def get_beta_schedule(options):
 
     return optax.linear_schedule(options["beta_init_value"], options["beta_end_value"], options["beta_transition_steps"], options["beta_transition_begin"])
 
-def transform_train_dataset(dataset, batch_size, tfds_seed):
+def transform_train_dataset(dataset, options):
     
     dataset = dataset.cache()
-    # dataset = dataset.shuffle(tf.data.experimental.cardinality(dataset).numpy(), seed = tfds_seed, reshuffle_each_iteration = True)
-    dataset = dataset.batch(batch_size, drop_remainder = True)
+    if options['tfds_shuffle_data']:
+        dataset = dataset.shuffle(tf.data.experimental.cardinality(dataset).numpy(), seed = options['tfds_seed'], reshuffle_each_iteration = True)
+    dataset = dataset.batch(options['batch_size_train'], drop_remainder = True)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     
     return dataset
 
-def transform_validate_dataset(dataset, batch_size):
+def transform_validate_dataset(dataset, options):
     
     dataset = dataset.cache()
-    dataset = dataset.batch(batch_size, drop_remainder = True)
-    # dataset = dataset.batch(tf.data.experimental.cardinality(dataset).numpy())
+    dataset = dataset.batch(options['batch_size_validate'], drop_remainder = True)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     
     return dataset
@@ -863,8 +863,8 @@ def create_tf_dataset(y, u, options):
     train_dataset = full_train_set.take(n_data_train)
     validate_dataset = full_train_set.skip(n_data_train).take(n_data_validate)
 
-    train_dataset = transform_train_dataset(train_dataset, options['batch_size_train'], options['tf_data_seed'])
-    validate_dataset = transform_validate_dataset(validate_dataset, options['batch_size_validate'])
+    train_dataset = transform_train_dataset(train_dataset, options)
+    validate_dataset = transform_validate_dataset(validate_dataset, options)
 
     return train_dataset, validate_dataset
 
@@ -885,7 +885,7 @@ def get_group_name(options):
     return group_name
 
 # log to https://wandb.ai/james-gatsby/projects
-def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt_mu3, options):
+def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, z, y, mu1, gt_mu1, mu2, gt_mu2, mu3, predicted_mu3, gt_mu3, options):
   
     group_name = get_group_name(options)
 
@@ -900,14 +900,19 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
     n_cols = 2
     cnt = 1
     for row in range(n_rows):
-        for col in range(1):
+        for col in range(n_cols):
             plt.subplot(n_rows, n_cols, cnt)
             for d in range(D):
-                plt.plot(y[row,:,d],'o', c=palette[d])
-            cnt += 2
+                if col == 0:
+                    plt.plot(z[row,:,d],'--', c=palette[d])
+                else:
+                    plt.plot(y[row,:,d],'o', c=palette[d])
+            cnt += 1
 
     f2 = plt.figure(2)
     # plt.suptitle('prior (actions set to 0)')
+    _, predicted_mu1 = R2_inferred_vs_actual_z(mu1, gt_mu1)
+    n_cols = 3
     cnt = 1
     for row in range(n_rows):
         for col in range(n_cols):
@@ -915,8 +920,10 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
             for d in range(D):
                 if col == 0:
                     plt.plot(gt_mu1[row,:,d],'--', c=palette[d])
-                else:
+                elif col == 1:
                     plt.plot(mu1[row,:,d],'--', c=palette[d])
+                elif col == 2:
+                    plt.plot(predicted_mu1[row,:,d],'--', c=palette[d])
             # if row == 0 and col == 0:
             #     plt.title('true model')
             # if row == 0 and col == 1:
@@ -925,6 +932,7 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
     
     f3 = plt.figure(3)
     # plt.suptitle('conditional prior (non-zero actions)')
+    _, predicted_mu2 = R2_inferred_vs_actual_z(mu2, gt_mu2)
     cnt = 1
     for row in range(n_rows):
         for col in range(n_cols):
@@ -932,8 +940,10 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
             for d in range(D):
                 if col == 0:
                     plt.plot(gt_mu2[row,:,d],'--', c=palette[d])
-                else:
+                elif col == 1:
                     plt.plot(mu2[row,:,d],'--', c=palette[d])
+                elif col == 2:
+                    plt.plot(predicted_mu2[row,:,d],'--', c=palette[d])
             # if row == 0 and col == 0:
             #     plt.title('true model')
             # if row == 0 and col == 1:
@@ -949,8 +959,10 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
             for d in range(D):
                 if col == 0:
                     plt.plot(gt_mu3[row,:,d],'--', c=palette[d])
-                else:
+                elif col == 1:
                     plt.plot(mu3[row,:,d],'--', c=palette[d])
+                elif col == 2:
+                    plt.plot(predicted_mu3[row,:,d],'--', c=palette[d])
             # if row == 0 and col == 0:
             #     plt.title('true model')
             # if row == 0 and col == 1:
@@ -958,6 +970,6 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt
             cnt += 1
 
     to_log = { "ELBO": -loss.mean(), "KL_qp": kl_qp.mean(), "CE_qf": ce_qf.mean(), "CE_qF": ce_qF.mean(), "CE_qf - CE_qF": (ce_qf - ce_qF).mean(),\
-               "1) observations": f1, "2) prior (actions set to 0)": f2, "3) conditional prior (non-zero actions)": f3, "4) posterior (given actions and observations)": f4}
+               "1) latents and observations": f1, "2) prior (actions set to 0)": f2, "3) conditional prior (non-zero actions)": f3, "4) posterior (given actions and observations)": f4}
 
     wandb.log(to_log)

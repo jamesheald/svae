@@ -185,7 +185,8 @@ options["beta_end_value"] = 1.
 options["beta_transition_begin"] = 1000
 options["beta_transition_steps"] = 1000
 options['fraction_for_validation'] = 0.
-options['tf_data_seed'] = 0
+options['tfds_shuffle_data'] = False
+options['tfds_seed'] = 0
 options['batch_size_train'] = 250
 options['batch_size_validate'] = 50
 options['fit_LDS'] = True
@@ -295,6 +296,6 @@ for itr in pbar:
 
         R2, predicted_z = R2_inferred_vs_actual_z(mu_posterior, gt_smoothed['smoothed_means'])
 
-        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, predicted_z, gt_smoothed['smoothed_means'], options)
+        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, true_z, y, mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, mu_posterior, predicted_z, gt_smoothed['smoothed_means'], options)
 
 breakpoint()
