@@ -1,6 +1,6 @@
 from jax import numpy as np
 from jax import random, jit, vmap, value_and_grad
-from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, get_constrained_prior_params, initialise_LDS_params_via_M_step, log_prob_under_posterior, create_tf_dataset
+from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, get_constrained_prior_params, initialise_LDS_params_via_M_step, log_prob_under_posterior, create_tf_dataset, batch_get_prior_marginal_means
 from jax.lax import scan, stop_gradient
 from flax import linen as nn
 
@@ -163,8 +163,8 @@ B = 250
 T = 100
 D = 2
 U = 1
-h_dim_rpm = 50
-h_dim_u_emb = 50
+h_dims_rpm = [50, 50, 50]
+h_dims_u_emb = [50, 50, 50]
 carry_dim = 50
 prior_lr = 1e-3
 learning_rate = 1e-3
@@ -174,6 +174,8 @@ log_every = 250
 
 options = {}
 options['normalise_y'] = True
+options['diagonal_covariance_RPM'] = True # setting this to True seems important
+options['diagonal_covariance_q_potentials'] = True
 options['embed_u'] = False
 options['f_time_dependent'] = False
 options['initialise_via_M_step'] = False
@@ -182,9 +184,9 @@ options["beta_init_value"] = 0.
 options["beta_end_value"] = 1.
 options["beta_transition_begin"] = 1000
 options["beta_transition_steps"] = 1000
-options['fraction_for_validation'] = 0.2
+options['fraction_for_validation'] = 0.
 options['tf_data_seed'] = 0
-options['batch_size_train'] = 100
+options['batch_size_train'] = 250
 options['batch_size_validate'] = 50
 options['fit_LDS'] = True
 options['save_dir'] = "/nfs/nhome/live/jheald/svae/my_code/runs"
@@ -199,7 +201,11 @@ if options['fit_LDS']:
     keys = random.split(subkey4, B)
     true_z, y, u = batch_generate_data(true_prior_params, T, D, U, keys)
 
-    smoothed_true_params = batch_perform_Kalman_smoothing_true_params(true_prior_params, y, u)
+    batch_get_prior_marginal_means_jit = jit(batch_get_prior_marginal_means)
+    gt_mu_no_u = batch_get_prior_marginal_means_jit(true_prior_params, u*0.)
+    gt_mu_u = batch_get_prior_marginal_means_jit(true_prior_params, u)
+    
+    gt_smoothed = batch_perform_Kalman_smoothing_true_params(true_prior_params, y, u)
 
 else:
 
@@ -208,7 +214,7 @@ else:
 if options['f_time_dependent']:
 
     time = np.arange(T)
-    time = (time - time.mean())/time.std() 
+    time = (time - time.mean()) / time.std() 
     y = np.concatenate((y[:B,:,:], time[None, :, None].repeat(B, axis=0)),axis=2)
 
 if options['normalise_y']:
@@ -218,15 +224,15 @@ if options['normalise_y']:
 train_dataset, validate_dataset = create_tf_dataset(y, u, options)
 
 # RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
-RPM = GRU_RPM(carry_dim=carry_dim, h_dim=h_dim_rpm, z_dim=D, T=T)
-delta_q = delta_q_params(carry_dim=carry_dim, z_dim=D)
+RPM = GRU_RPM(carry_dim=carry_dim, h_dims=h_dims_rpm, z_dim=D, T=T, diagonal_covariance=options['diagonal_covariance_RPM'])
+delta_q = delta_q_params(carry_dim=carry_dim, h_dims=[], z_dim=D, diagonal_covariance=options['diagonal_covariance_q_potentials'])
 # delta_q = rpm_network(h_dim=h_dim_rpm, z_dim=D)
 params = {}
 if options['f_time_dependent']:
-    params["rpm_params"] = RPM.init(y = np.ones((D+1,)), rngs = {'params': subkey1})
+    params["rpm_params"] = RPM.init(x = np.ones((D+1,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D+1)), rngs = {'params': subkey7})
 else:
-    params["rpm_params"] = RPM.init(y = np.ones((B,T,D)), rngs = {'params': subkey1})
+    params["rpm_params"] = RPM.init(x = np.ones((B,T,D)), rngs = {'params': subkey1})
     # params["rpm_params"] = RPM.init(y = np.ones((D,)), rngs = {'params': subkey1})
     params["delta_q_params"] = delta_q.init(y = np.ones((T,D,)), rngs = {'params': subkey7})
 
@@ -235,7 +241,7 @@ if options['initialise_via_M_step']:
 else:
     params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step=False)
 
-u_emb = control_network(u_emb_dim=U, h_dim=h_dim_u_emb)
+u_emb = control_network(u_emb_dim=U, h_dims=h_dims_u_emb)
 params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5})
 
 rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
@@ -254,21 +260,18 @@ beta_schedule = get_beta_schedule(options)
 
 train_step_jit = jit(partial(train_step, options=options))
 
-batch_perform_Kalman_smoothing_true_params_jit = jit(batch_perform_Kalman_smoothing_true_params)
-
 print("pass params around via opt_states not separately")
-print("not sure how to deal with u_embed in EM (not embedding at the moment)")
 
 n_batches_train = len(train_dataset)
 pbar = trange(n_epochs)
+R2 = 0.
 for itr in pbar:
 
     subkey, key = random.split(key, 2)
 
     beta = beta_schedule(itr)
 
-    # convert the tf.data.Dataset train_dataset into an iterable
-    # this iterable is shuffled differently each epoch
+    # convert the tf.data.Dataset train_dataset into an iterable that is shuffled differently each epoch
     train_datagen = iter(tfds.as_numpy(train_dataset))
 
     for batch in range(1, n_batches_train + 1):
@@ -279,22 +282,19 @@ for itr in pbar:
 
             params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y_batch, u_batch, subkey, beta)
 
-            smoothed_true_params2 = batch_perform_Kalman_smoothing_true_params_jit(true_prior_params, y_batch, u_batch)
-
-            R2, predicted_z = R2_inferred_vs_actual_z(mu_posterior, smoothed_true_params2['smoothed_means']) # [options['batch_size_train'] + np.arange(options['batch_size_train'])]
-
         else:
 
             params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y[:B,:,:], u[:B,:,None], subkey, beta)
-            R2 = 0.
 
         pbar.set_description("train loss: {:.3f},  kl_qp: {:.3f}, ce_qf: {:.3f}, ce_qF: {:.3f}, R2 train states: {:.3f}".format(loss, kl_qp.mean(), ce_qf.mean(), ce_qF.mean(), R2))
 
-        # prior_params = get_constrained_prior_params(params['prior_params'], U)
-        # smoothed = batch_perform_Kalman_smoothing(prior_params, emission_potentials, u)
-
     if itr % log_every == 0:
 
-        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, predicted_z, smoothed_true_params2['smoothed_means'], options)
+        mu_no_u = batch_get_prior_marginal_means_jit(params['prior_params'], u*0.)
+        mu_u = batch_get_prior_marginal_means_jit(params['prior_params'], u)
+
+        R2, predicted_z = R2_inferred_vs_actual_z(mu_posterior, gt_smoothed['smoothed_means'])
+
+        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, predicted_z, gt_smoothed['smoothed_means'], options)
 
 breakpoint()

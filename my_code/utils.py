@@ -764,33 +764,6 @@ def get_marginal(J_prior, h_prior, J_posterior, h_posterior, D, T):
 
     return J_prior_marg, J_posterior_marg, h_prior_marg, h_posterior_marg
 
-# # Computes A.T @ Q^{-1} @ A in a way that's guaranteed to be symmetric
-# def inv_quad_form(Q, A):
-#     sqrt_Q = np.linalg.cholesky(Q)
-#     trm = solve_triangular(sqrt_Q, A, lower=True, check_finite=False)
-#     return trm.T @ trm
-
-# def inv_symmetric(Q):
-#     sqrt_Q = np.linalg.cholesky(Q)
-#     sqrt_Q_inv = np.linalg.inv(sqrt_Q)
-#     return sqrt_Q_inv.T @ sqrt_Q_inv
-
-# def dynamics_to_tridiag(prior_params, T, D):
-    
-#     Q1, m1, A, Q = prior_params["Q1"], prior_params["m1"], prior_params["A"], prior_params["Q"]
-    
-#     # diagonal blocks of precision matrix
-#     J = np.zeros((T, D, D))
-#     J = J.at[0].add(inv_symmetric(Q1))
-#     J = J.at[:-1].add(inv_quad_form(Q, A))
-#     J = J.at[1:].add(inv_symmetric(Q))
-    
-#     # lower diagonal blocks of precision matrix
-#     L = -np.linalg.solve(Q, A)
-#     L = np.tile(L[None, :, :], (T - 1, 1, 1))
-    
-#     return { "J": J, "L": L}
-
 def dynamics_to_tridiag(prior_params, T):
     
     Q1, m1, A, Q = prior_params["Q1"], prior_params["m1"], prior_params["A"], prior_params["Q"]
@@ -836,6 +809,28 @@ def get_prior_samples(p, u, key):
 
 batch_get_prior_samples = vmap(get_prior_samples, in_axes=(None,0,0))
 
+def get_next_mean(carry, inputs):
+
+    mu, p = carry
+    u = inputs
+
+    mu = p['A'] @ mu + p['B'] @ u
+
+    carry = mu, p
+    outputs = mu
+
+    return carry, outputs
+
+def get_prior_marginal_means(p, u):
+
+    carry = p['m1'], p
+    inputs = u[:-1,:]
+    _, mu = scan(get_next_mean, carry, inputs)
+
+    return np.concatenate((p['m1'][None], mu))
+
+batch_get_prior_marginal_means = vmap(get_prior_marginal_means, in_axes=(None,0))
+
 def get_beta_schedule(options):
 
     return optax.linear_schedule(options["beta_init_value"], options["beta_end_value"], options["beta_transition_steps"], options["beta_transition_begin"])
@@ -843,7 +838,7 @@ def get_beta_schedule(options):
 def transform_train_dataset(dataset, batch_size, tfds_seed):
     
     dataset = dataset.cache()
-    dataset = dataset.shuffle(tf.data.experimental.cardinality(dataset).numpy(), seed = tfds_seed, reshuffle_each_iteration = True)
+    # dataset = dataset.shuffle(tf.data.experimental.cardinality(dataset).numpy(), seed = tfds_seed, reshuffle_each_iteration = True)
     dataset = dataset.batch(batch_size, drop_remainder = True)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     
@@ -855,7 +850,6 @@ def transform_validate_dataset(dataset, batch_size):
     dataset = dataset.batch(batch_size, drop_remainder = True)
     # dataset = dataset.batch(tf.data.experimental.cardinality(dataset).numpy())
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    # dataset = np.array(list(dataset)[0]['image'])
     
     return dataset
 
@@ -891,28 +885,79 @@ def get_group_name(options):
     return group_name
 
 # log to https://wandb.ai/james-gatsby/projects
-def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, mu, y, options):
+def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, mu3, gt_mu3, options):
   
     group_name = get_group_name(options)
 
     wandb.init(project=options['project_name'], group=group_name, config=options, dir=options["save_dir"])
 
-    D = mu.shape[-1]
+    D = mu1.shape[-1]
     palette = sns.color_palette(None, D)
 
-    cnt = 1
+    f1 = plt.figure(1)
+    # plt.suptitle('observations')
     n_rows = 3
     n_cols = 2
+    cnt = 1
+    for row in range(n_rows):
+        for col in range(1):
+            plt.subplot(n_rows, n_cols, cnt)
+            for d in range(D):
+                plt.plot(y[row,:,d],'o', c=palette[d])
+            cnt += 2
+
+    f2 = plt.figure(2)
+    # plt.suptitle('prior (actions set to 0)')
+    cnt = 1
     for row in range(n_rows):
         for col in range(n_cols):
             plt.subplot(n_rows, n_cols, cnt)
             for d in range(D):
                 if col == 0:
-                    plt.plot(y[row,:,d],'--', c=palette[d])
+                    plt.plot(gt_mu1[row,:,d],'--', c=palette[d])
                 else:
-                    plt.plot(mu[row,:,d],'--', c=palette[d])
+                    plt.plot(mu1[row,:,d],'--', c=palette[d])
+            # if row == 0 and col == 0:
+            #     plt.title('true model')
+            # if row == 0 and col == 1:
+            #     plt.title('RPM')
             cnt += 1
     
-    to_log = { "ELBO": -loss.mean(), "KL_qp": kl_qp.mean(), "CE_qf": ce_qf.mean(), "CE_qF": ce_qF.mean(), "CE_qf - CE_qF": (ce_qf - ce_qF).mean(), "inferred (q) states": plt}
+    f3 = plt.figure(3)
+    # plt.suptitle('conditional prior (non-zero actions)')
+    cnt = 1
+    for row in range(n_rows):
+        for col in range(n_cols):
+            plt.subplot(n_rows, n_cols, cnt)
+            for d in range(D):
+                if col == 0:
+                    plt.plot(gt_mu2[row,:,d],'--', c=palette[d])
+                else:
+                    plt.plot(mu2[row,:,d],'--', c=palette[d])
+            # if row == 0 and col == 0:
+            #     plt.title('true model')
+            # if row == 0 and col == 1:
+            #     plt.title('RPM')
+            cnt += 1
+
+    f4 = plt.figure(4)
+    # plt.suptitle('posterior (given actions and observations)')
+    cnt = 1
+    for row in range(n_rows):
+        for col in range(n_cols):
+            plt.subplot(n_rows, n_cols, cnt)
+            for d in range(D):
+                if col == 0:
+                    plt.plot(gt_mu3[row,:,d],'--', c=palette[d])
+                else:
+                    plt.plot(mu3[row,:,d],'--', c=palette[d])
+            # if row == 0 and col == 0:
+            #     plt.title('true model')
+            # if row == 0 and col == 1:
+            #     plt.title('RPM')
+            cnt += 1
+
+    to_log = { "ELBO": -loss.mean(), "KL_qp": kl_qp.mean(), "CE_qf": ce_qf.mean(), "CE_qF": ce_qF.mean(), "CE_qf - CE_qF": (ce_qf - ce_qF).mean(),\
+               "1) observations": f1, "2) prior (actions set to 0)": f2, "3) conditional prior (non-zero actions)": f3, "4) posterior (given actions and observations)": f4}
 
     wandb.log(to_log)

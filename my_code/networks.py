@@ -2,6 +2,9 @@ from jax import numpy as np
 import flax.linen as nn
 from jax import vmap, random, value_and_grad
 
+from utils import construct_covariance_matrix
+from dynamax.utils.utils import psd_solve
+
 from flax.linen import initializers
 from flax.linen.activation import sigmoid, tanh
 from flax.linen.linear import default_kernel_init, Dense
@@ -13,6 +16,7 @@ from typing import (
   Callable,
   Optional,
   Tuple,
+  List,
 )
 
 from flax.typing import (
@@ -200,30 +204,27 @@ class GRUCell_LN_NoInput(nn.RNNCellBase):
 
 class control_network(nn.Module):
     u_emb_dim: int
-    h_dim: int
+    h_dims: List
 
     def setup(self):
 
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.dense_4 = nn.Dense(features=self.u_emb_dim)
+      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+
+      self.dense_out = nn.Dense(features=self.u_emb_dim)
 
     def __call__(self, u):
 
-        def embed_u(u):
+        def embed_u(x):
 
-            # x = nn.LayerNorm()(y)
-             # x = self.dense_1(x)
-            x = self.dense_1(u)
+          for dense, layer_norm in self.mlp:
+            
+            x = dense(x)
+            x = layer_norm(x)
             x = nn.relu(x)
-            x = self.dense_2(x)
-            x = nn.relu(x)
-            x = self.dense_3(x)
-            x = nn.relu(x)
-            x = self.dense_4(x)
 
-            return x
+          x = self.dense_out(x)
+
+          return x
 
         if u.ndim == 1:
             x = embed_u(u)
@@ -283,9 +284,10 @@ class rpm_network(nn.Module):
 # network for creating time-dependent RPM factors f_t(z_t | x_t), where the time dependence is provided by a GRU
 class GRU_RPM(nn.Module):
     carry_dim: int
-    h_dim: int
+    h_dims: List
     z_dim: int
     T: int
+    diagonal_covariance: bool
 
     def setup(self):
         
@@ -294,47 +296,44 @@ class GRU_RPM(nn.Module):
 
         self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
 
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        # self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-        self.dense_4 = nn.Dense(features=2*self.z_dim)
+        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
 
-    def __call__(self, y):
+        if self.diagonal_covariance:
+          self.dense_out = nn.Dense(features=self.z_dim * 2)
+        else:
+          self.dense_out = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
+
+    def __call__(self, x):
 
         def get_natural_parameters(x):
 
             mu, var_output_flat = np.split(x, [self.z_dim])
 
-            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-            Sigma = np.diag(np.exp(var_output_flat))
+            if self.diagonal_covariance:
 
-            # J = psd_solve(Sigma, np.eye(self.z_dim))
-            J = np.diag(1/np.exp(var_output_flat))
+              Sigma = np.diag(np.exp(var_output_flat))
+              J = np.diag(1 / np.exp(var_output_flat))
+
+            else:
+
+              Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+              J = psd_solve(Sigma, np.eye(self.z_dim))
+
             h = J @ mu
 
             return Sigma, mu, J, h
 
         carry = self.GRU(np.zeros((self.T,1)), initial_carry=self.carry_init)
 
-        # x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(y.shape[0], axis=0), y), axis=2)))
-        # x = nn.relu(x)
-        # x = self.LN_2(self.dense_2(x))
-        # x = nn.relu(x)
-        # x = self.LN_3(self.dense_3(x))
-        # x = nn.relu(x)
-        # x = self.dense_4(x)
+        # x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(x.shape[0], axis=0), x), axis=2)))
 
-        x = self.LN_1(self.dense_1(y))
-        x = nn.relu(x)
-        x = self.LN_2(self.dense_2(x))
-        x = nn.relu(x)
-        x = self.LN_3(self.dense_3(x))
-        x = nn.relu(x)
-        x = self.dense_4(np.concatenate((carry[None].repeat(x.shape[0], axis=0), x), axis=2))
+        for dense, layer_norm in self.mlp:
+            
+            x = dense(x)
+            x = layer_norm(x)
+            x = nn.relu(x)
+
+        x = self.dense_out(np.concatenate((carry[None].repeat(x.shape[0], axis=0), x), axis=2))
 
         Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
 
@@ -342,15 +341,21 @@ class GRU_RPM(nn.Module):
 
 class delta_q_params(nn.Module):
     carry_dim: int
+    h_dims: List
     z_dim: int
+    diagonal_covariance: bool
 
     def setup(self):
         
         # self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
         self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
 
-        # self.dense = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-        self.dense = nn.Dense(self.z_dim*2)
+        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+
+        if self.diagonal_covariance:
+          self.dense_out = nn.Dense(self.z_dim * 2)
+        else:
+          self.dense_out = nn.Dense(self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
 
     def __call__(self, y):
 
@@ -358,22 +363,28 @@ class delta_q_params(nn.Module):
 
             mu, var_output_flat = np.split(x, [self.z_dim])
 
-            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+            if self.diagonal_covariance:
+              Sigma = np.diag(np.exp(var_output_flat) + 1e-6) # Sigma = np.diag(np.exp(var_output_flat)+1e-6)
+              J = np.diag(1 / np.exp(var_output_flat))
+            else:
+              Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+              J = psd_solve(Sigma, np.eye(self.z_dim))
 
-            Sigma = np.diag(np.exp(var_output_flat)+1e-6)
-
-            J = np.diag(1/np.exp(var_output_flat))
-
-            # J = psd_solve(Sigma, np.eye(self.z_dim))
             h = J @ mu
 
             return Sigma, mu, J, h
 
-        concatenated_carry = self.BiGRU(y)
+        x = self.BiGRU(y)
 
-        out = self.dense(concatenated_carry)
+        for dense, layer_norm in self.mlp:
+            
+          x = dense(x)
+          x = layer_norm(x)
+          x = nn.relu(x)
 
-        Sigma, mu, J, h = vmap(get_natural_parameters)(out)
+        x = self.dense_out(x)
+
+        Sigma, mu, J, h = vmap(get_natural_parameters)(x)
 
         return {'Sigma': Sigma, 'mu': mu, 'smoothed_covariances': Sigma, 'smoothed_means': mu, 'J': J, 'h': h}
 
