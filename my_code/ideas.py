@@ -1,14 +1,12 @@
-# gradient acculumation so you can do RPM properly instead of minibatches?
+# nonlinear u
 
 # cyclic beta
 
 # plot grad norm
-# plot inferred latents direct from rpm factor
 # use parallel KF and add 'b' to it'
 
 # transformers instead of BiGRU
 
-# nonlinear u
 # learn dynamics bias as B /in R 3 x 2 with B @ \tilde{u}, where \tilde{u} = [u, 1] (colummn vector)
 # A x + B f(u) (sequential updates in M step, closed form prior parameters and then gradient based f; pass f(u) to BiGRU in E-step with stopgrad(f(u))
 
@@ -27,8 +25,6 @@
 # could RPM factors be modelled as input(observation)-driven GRU or BiGRU?
 
 # transformer tricks for dealing with quadratic cost (of RPM)?
-
-# test mini-batch version
 
 # consider removing layernorm (or applying it more sparingly, if not getting great results)
 

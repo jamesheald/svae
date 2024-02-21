@@ -1,8 +1,10 @@
 from jax import numpy as np
-from jax import random, jit, vmap, value_and_grad
-from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, get_constrained_prior_params, initialise_LDS_params_via_M_step, log_prob_under_posterior, create_tf_dataset, batch_get_prior_marginal_means
+from jax import random, jit, vmap, value_and_grad, jacfwd, jacrev
+from utils import kl_qp_natural_parameters, batch_expected_log_F, entropy, initialise_LDS_params, generate_LDS_params, batch_generate_data, R2_true_model, construct_covariance_matrix, update_prior, marginal_u_integrated_out, marginal, policy_loss, truncate_singular_values, R2_inferred_vs_actual_z, scale_y, load_pendulum_control_data, moment_match_RPM, get_marginals_of_joint, log_to_wandb, batch_perform_Kalman_smoothing, closed_form_LDS_updates, dynamics_to_tridiag, get_beta_schedule, batch_perform_Kalman_smoothing_true_params, get_constrained_prior_params, initialise_LDS_params_via_M_step, log_prob_under_posterior, create_tf_dataset, batch_get_prior_marginal_means, perform_Kalman_smoothing
 from jax.lax import scan, stop_gradient
 from flax import linen as nn
+
+from jax.tree_util import tree_map
 
 from flax.training.orbax_utils import restore_args_from_target
 from flax.training import train_state
@@ -34,7 +36,7 @@ def compute_free_energy(prior_params, prior_JL, J_RPM, mu_RPM, Sigma_RPM, smooth
     # cross_entropy -= log_prob_under_prior(prior_params, smoothed['smoothed_means'], u) # commented out along with call in log_prob_under_posterior, as they cancel
     kl_qp = cross_entropy - posterior_entropy
 
-    ce_qf = 0.5 * np.einsum("tij,tij->", J_RPM, smoothed['smoothed_covariances'])
+    ce_qf = 0.5 * np.einsum("tij,tij->", J_RPM[batch_id], smoothed['smoothed_covariances'])
     ce_qf -= MVN(loc=mu_RPM[batch_id], covariance_matrix=Sigma_RPM[batch_id]).log_prob(smoothed['smoothed_means']).sum()
     
     keys = random.split(key, options['num_MC_samples'])
@@ -49,7 +51,7 @@ def compute_free_energy(prior_params, prior_JL, J_RPM, mu_RPM, Sigma_RPM, smooth
 
     return kl_qp, ce_qf, ce_qF, T_log_B
 
-def get_RPM_factors(params, opt_states, y, options):
+def get_RPM_factors(rpm_params, opt_states, y, options):
 
     rpm_opt_state, _, _, _ = opt_states
 
@@ -70,9 +72,9 @@ def get_RPM_factors(params, opt_states, y, options):
     # RPM['Sigma'] = vmap(vmap(lambda S: psd_solve(S, np.eye(S.shape[-1]))))(RPM['J'])
     # RPM['mu'] = np.einsum("hijk,hik->hij", RPM['Sigma'], RPM['h'])
 
-    RPM = rpm_opt_state.apply_fn(params["rpm_params"], y)
+    RPM = rpm_opt_state.apply_fn(rpm_params, y)
 
-    return RPM, RPM
+    return RPM
 
 def get_posterior(params, prior_params, opt_states, y, u, RPM_constant):
 
@@ -87,30 +89,33 @@ def get_posterior(params, prior_params, opt_states, y, u, RPM_constant):
     # emission_potentials = vmap(delta_q_opt.apply_fn, in_axes=(None,0))(params["delta_q_params"], y)
     emission_potentials = delta_q_opt.apply_fn(params["delta_q_params"], y)
 
-    smoothed = batch_perform_Kalman_smoothing(prior_params, emission_potentials, u)
+    if y.ndim == 2:
+        smoothed = perform_Kalman_smoothing(prior_params, emission_potentials, u)
+    elif y.ndim == 3:
+        smoothed = batch_perform_Kalman_smoothing(prior_params, emission_potentials, u)
 
     return smoothed, emission_potentials
 
-def get_free_energy(params, opt_states, y, u, key, beta, options):
-
-    RPM_constant, RPM = get_RPM_factors(params, opt_states, y, options)
+def get_free_energy(params, opt_states, y, u_raw, key, beta, batch_id, options):
 
     if options['embed_u']:
 
         _, _, _, control_state = opt_states
 
-        u = control_state.apply_fn(params["u_emb_params"], u)
+        u = control_state.apply_fn(params["u_emb_params"], u_raw[batch_id])
+
+    else:
+
+        u = u_raw[batch_id]
 
     T, U = y.shape[1], u.shape[-1]
     prior_params = get_constrained_prior_params(params['prior_params'], U)
 
     prior_JL = dynamics_to_tridiag(prior_params, T)
 
-    smoothed, emission_potentials = get_posterior(params, prior_params, opt_states, y, u, RPM_constant)
+    smoothed, emission_potentials = get_posterior(params, prior_params, opt_states, y[batch_id], u, params['rpm_nat_params'])
 
-    B = y.shape[0]
-    keys = random.split(key, B)
-    kl_qp, ce_qf, ce_qF, T_log_B = vmap(compute_free_energy, in_axes=(None,None,0,None,None,0,0,0,0,0,None))(prior_params, prior_JL, RPM['J'], RPM['mu'], RPM['Sigma'], smoothed, emission_potentials, u, keys, np.arange(B), options)
+    kl_qp, ce_qf, ce_qF, T_log_B = compute_free_energy(prior_params, prior_JL, params['rpm_nat_params']['J'], params['rpm_nat_params']['mu'], params['rpm_nat_params']['Sigma'], smoothed, emission_potentials, u, key, batch_id, options)
     free_energy = - beta * kl_qp - ce_qf + ce_qF - T_log_B
 
     return -free_energy.mean(), (kl_qp, ce_qf, ce_qF, smoothed)
@@ -122,13 +127,17 @@ def params_update(grads, opt_states):
     rpm_opt_state, delta_q_opt, prior_opt_state, control_state = opt_states
 
     rpm_opt_state = rpm_opt_state.apply_gradients(grads = grads["rpm_params"])
+    # rpm_opt_state = rpm_opt_state.apply_gradients(grads = tree_map(lambda x: x.mean(axis=0), grads["rpm_params"]))
 
     delta_q_opt = delta_q_opt.apply_gradients(grads = grads["delta_q_params"])
+    # delta_q_opt = delta_q_opt.apply_gradients(grads = tree_map(lambda x: x.mean(axis=0), grads["delta_q_params"]))
 
     prior_opt_state = prior_opt_state.apply_gradients(grads = grads["prior_params"])
+    # prior_opt_state = prior_opt_state.apply_gradients(grads = tree_map(lambda x: x.mean(axis=0), grads["prior_params"]))
     prior_opt_state.params["A"] = truncate_singular_values(prior_opt_state.params["A"])
 
     control_state = control_state.apply_gradients(grads = grads["u_emb_params"])
+    # control_state = control_state.apply_gradients(grads = tree_map(lambda x: x.mean(axis=0), grads["u_emb_params"]))
 
     params = {}
     params["rpm_params"] = rpm_opt_state.params
@@ -138,12 +147,52 @@ def params_update(grads, opt_states):
 
     return params, [rpm_opt_state, delta_q_opt, prior_opt_state, control_state]
 
+def single_train_step(carry, inputs, options):
+
+    params, opt_states, y, u, beta, rpm_nat_params, grads_RPM, grads_sum = carry
+    batch_id, key = inputs
+
+    from copy import deepcopy
+    params1 = deepcopy(params)
+    params1['rpm_nat_params'] = rpm_nat_params
+    (loss, (kl_qp, ce_qf, ce_qF, smoothed)), grads = get_value_and_grad(params1, opt_states, y, u, key, beta, batch_id, options)
+
+    # combine gradients using chain rule
+    grads["rpm_params"] = tree_map(partial(lambda x, y: np.sum(x * y[:,:,:,:,None], axis=(0,1,2,3)) if x.ndim==5 else np.sum(x * y[:,:,:,:,None,None], axis=(0,1,2,3)), y=grads["rpm_nat_params"]['J']), grads_RPM['J'])
+    # gn = tree_map(partial(lambda x, y: np.sum(x * y[:,:,:,None], axis=(0,1,2)) if x.ndim==4 else np.sum(x * y[:,:,:,None,None], axis=(0,1,2)), y=grads["rpm_nat_params"]['h']), grads_RPM['h'])
+    # grads["rpm_params"] = tree_map(lambda x, y: x + y, grads["rpm_params"], gn) 
+    gn = tree_map(partial(lambda x, y: np.sum(x * y[:,:,:,:,None], axis=(0,1,2,3)) if x.ndim==5 else np.sum(x * y[:,:,:,:,None,None], axis=(0,1,2,3)), y=grads["rpm_nat_params"]['Sigma']), grads_RPM['Sigma'])
+    grads["rpm_params"] = tree_map(lambda x, y: x + y, grads["rpm_params"], gn) 
+    gn = tree_map(partial(lambda x, y: np.sum(x * y[:,:,:,None], axis=(0,1,2)) if x.ndim==4 else np.sum(x * y[:,:,:,None,None], axis=(0,1,2)), y=grads["rpm_nat_params"]['mu']), grads_RPM['mu'])
+    grads["rpm_params"] = tree_map(lambda x, y: x + y, grads["rpm_params"], gn) 
+
+    # params, opt_states = params_update(grads, opt_states)
+
+    del grads['rpm_nat_params']
+    grads_sum = tree_map(lambda x, y: x + y, grads_sum, grads)
+
+    carry = params, opt_states, y, u, beta, rpm_nat_params, grads_RPM, grads_sum
+    outputs = loss, kl_qp, ce_qf, ce_qF, smoothed['smoothed_means']
+
+    return carry, outputs
+
 def train_step(params, opt_states, y, u, key, beta, options):
 
-    (loss, (kl_qp, ce_qf, ce_qF, smoothed)), grads = get_value_and_grad(params, opt_states, y, u, key, beta, options)
+    rpm_nat_params = get_RPM_factors(params["rpm_params"], opt_states, y, options)
+    grads_RPM = jacrev(get_RPM_factors)(params["rpm_params"], opt_states, y, options)
+
+    grads_sum = tree_map(lambda x: np.zeros(x.shape), params)
+
+    carry = params, opt_states, y, u, beta, rpm_nat_params, grads_RPM, grads_sum
+    B = y.shape[0]
+    keys = random.split(key, B)
+    inputs = np.arange(B), keys
+    (params, opt_states, _, _, _, _, _, grads_sum), (loss, kl_qp, ce_qf, ce_qF, smoothed_means) = scan(partial(single_train_step, options=options), carry, inputs)
+
+    grads = tree_map(lambda x: x / B, grads_sum)
     params, opt_states = params_update(grads, opt_states)
 
-    return params, opt_states, loss, kl_qp, ce_qf, ce_qF, smoothed['smoothed_means']
+    return params, opt_states, loss.mean(), kl_qp, ce_qf, ce_qF, smoothed_means
 
 def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=[]):
 
@@ -162,14 +211,14 @@ def get_train_state(ckpt_metrics_dir, all_models, all_optimisers=[], all_params=
         
     return states, mngr
 
-B = 1000
+B = 250
 T = 100
 D = 2
 U = 1
 h_dims_q = [50, 50, 50]
 h_dims_rpm = [50, 50, 50]
 h_dims_u_emb = [50, 50, 50]
-carry_dim_GRU_RPM = 50
+carry_dim = 50
 prior_lr = 1e-3
 learning_rate = 1e-3
 max_grad_norm = 10
@@ -178,7 +227,7 @@ log_every = 250
 
 options = {}
 options['normalise_y'] = True
-options['diagonal_covariance_RPM'] = True # setting this to True seems critical for good results
+options['diagonal_covariance_RPM'] = False # setting this to True seems critical for good results
 options['diagonal_covariance_q_potentials'] = True
 options['embed_u'] = False
 options['f_time_dependent'] = False
@@ -189,10 +238,11 @@ options["beta_end_value"] = 1.
 options["beta_transition_begin"] = 1000
 options["beta_transition_steps"] = 1000
 options['fraction_for_validation'] = 0.
-options['tfds_shuffle_data'] = True
+options['tfds_shuffle_data'] = False
 options['tfds_seed'] = 0
 options['batch_size_train'] = 250
 options['batch_size_validate'] = 50
+options['gradient_accumulate_every'] = 250
 options['fit_LDS'] = True
 options['save_dir'] = "/nfs/nhome/live/jheald/svae/my_code/runs"
 options['project_name'] = 'RPM-mycode'
@@ -207,8 +257,8 @@ if options['fit_LDS']:
     true_z, y, u = batch_generate_data(true_prior_params, T, D, U, keys)
 
     batch_get_prior_marginal_means_jit = jit(batch_get_prior_marginal_means)
-    gt_mu_no_u = batch_get_prior_marginal_means_jit(true_prior_params, u[:3]*0.)
-    gt_mu_u = batch_get_prior_marginal_means_jit(true_prior_params, u[:3])
+    gt_mu_no_u = batch_get_prior_marginal_means_jit(true_prior_params, u*0.)
+    gt_mu_u = batch_get_prior_marginal_means_jit(true_prior_params, u)
     
     gt_smoothed = batch_perform_Kalman_smoothing_true_params(true_prior_params, y, u)
 
@@ -226,10 +276,10 @@ if options['normalise_y']:
 
     y = scale_y(y)
 
-train_dataset, validate_dataset = create_tf_dataset(y, u, gt_smoothed['smoothed_means'], options)
+train_dataset, validate_dataset = create_tf_dataset(y, u, options)
 
 # RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
-RPM = GRU_RPM(carry_dim=carry_dim_GRU_RPM, h_dims=h_dims_rpm, z_dim=D, T=T, diagonal_covariance=options['diagonal_covariance_RPM'])
+RPM = GRU_RPM(carry_dim=carry_dim, h_dims=h_dims_rpm, z_dim=D, T=T, diagonal_covariance=options['diagonal_covariance_RPM'])
 # delta_q = delta_q_params(carry_dim=carry_dim, h_dims=[], z_dim=D, diagonal_covariance=options['diagonal_covariance_q_potentials'])
 delta_q = emission_potential(z_dim=D, h_dims=h_dims_q, diagonal_covariance=options['diagonal_covariance_q_potentials'])
 # delta_q = rpm_network(h_dim=h_dim_rpm, z_dim=D)
@@ -256,7 +306,10 @@ delta_q_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_globa
 prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
 u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 
-# optimiser = optax.MultiSteps(optimiser, every_k_schedule = args.gradient_accumulate_every)
+# rpm_opt = opt.MultiSteps(rpm_opt, every_k_schedule = options['gradient_accumulate_every'])
+# delta_q_opt = opt.MultiSteps(delta_q_opt, every_k_schedule = options['gradient_accumulate_every'])
+# prior_opt = opt.MultiSteps(prior_opt, every_k_schedule = options['gradient_accumulate_every'])
+# u_emb_opt = opt.MultiSteps(u_emb_opt, every_k_schedule = options['gradient_accumulate_every'])
 
 all_optimisers = (rpm_opt, delta_q_opt, prior_opt, u_emb_opt)
 all_params = (params["rpm_params"], params["delta_q_params"], params["prior_params"], params["u_emb_params"])
@@ -266,8 +319,6 @@ opt_states, mngr = get_train_state(options['save_dir'], all_models, all_optimise
 beta_schedule = get_beta_schedule(options)
 
 train_step_jit = jit(partial(train_step, options=options))
-
-get_RPM_factors_jit = jit(partial(get_RPM_factors, options=options))
 
 print("pass params around via opt_states not separately")
 
@@ -285,27 +336,25 @@ for itr in pbar:
 
     for batch in range(1, n_batches_train + 1):
 
-        y_batch, u_batch, gt_mu_batch = next(train_datagen)
+        y_batch, u_batch = next(train_datagen)
 
         if options['fit_LDS']:
 
-            params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu = train_step_jit(params, opt_states, y_batch, u_batch, subkey, beta)
+            params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y_batch, u_batch, subkey, beta)
 
         else:
 
-            params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu = train_step_jit(params, opt_states, y[:B,:,:], u[:B,:,None], subkey, beta)
+            params, opt_states, loss, kl_qp, ce_qf, ce_qF, mu_posterior = train_step_jit(params, opt_states, y[:B,:,:], u[:B,:,None], subkey, beta)
 
         pbar.set_description("train loss: {:.3f},  kl_qp: {:.3f}, ce_qf: {:.3f}, ce_qF: {:.3f}, R2 train states: {:.3f}".format(loss, kl_qp.mean(), ce_qf.mean(), ce_qF.mean(), R2))
 
     if itr % log_every == 0:
 
-        mu_no_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3]*0.)
-        mu_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3])
+        mu_no_u = batch_get_prior_marginal_means_jit(params['prior_params'], u*0.)
+        mu_u = batch_get_prior_marginal_means_jit(params['prior_params'], u)
 
-        RPM, _ = get_RPM_factors_jit(params, opt_states, y_batch[:3])
+        R2, predicted_z = R2_inferred_vs_actual_z(mu_posterior, gt_smoothed['smoothed_means'])
 
-        R2, projected_mu = R2_inferred_vs_actual_z(mu, gt_mu_batch)
-
-        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, true_z[:3], y[:3], mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, projected_mu, RPM['mu'], gt_mu_batch, options)
+        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, true_z, y, mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, mu_posterior, predicted_z, gt_smoothed['smoothed_means'], options)
 
 breakpoint()

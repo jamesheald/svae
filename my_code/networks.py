@@ -235,49 +235,52 @@ class control_network(nn.Module):
 
         return x
 
-class rpm_network(nn.Module):
+class emission_potential(nn.Module):
     z_dim: int
-    h_dim: int
+    h_dims: int
+    diagonal_covariance: bool
 
     def setup(self):
 
-        self.dense_1 = nn.Dense(features=self.h_dim)
-        self.LN_1 = nn.LayerNorm()
-        self.dense_2 = nn.Dense(features=self.h_dim)
-        self.LN_2 = nn.LayerNorm()
-        self.dense_3 = nn.Dense(features=self.h_dim)
-        self.LN_3 = nn.LayerNorm()
-        # self.dense_4 = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
-        self.dense_4 = nn.Dense(features=self.z_dim*2)
+      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
 
-    def __call__(self, y):
+      if self.diagonal_covariance:
+        self.dense_out = nn.Dense(features=self.z_dim * 2)
+      else:
+        self.dense_out = nn.Dense(features=self.z_dim + self.z_dim * (self.z_dim + 1) // 2)
 
-        def get_natural_parameters(y):
+    def __call__(self, x):
 
-            x = self.LN_1(self.dense_1(y))
-            x = nn.relu(x)
-            x = self.LN_2(self.dense_2(x))
-            x = nn.relu(x)
-            x = self.LN_3(self.dense_3(x))
-            x = nn.relu(x)
-            x = self.dense_4(x)
+        def get_natural_parameters(x):
 
-            h, var_output_flat = np.split(x, [self.z_dim])
+            mu, var_output_flat = np.split(x, [self.z_dim])
 
-            # Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
-            Sigma = np.diag(np.exp(var_output_flat))
-            # J = psd_solve(Sigma, np.eye(self.z_dim))
-            J = np.diag(1/np.exp(var_output_flat))
-            mu = Sigma @ h
+            if self.diagonal_covariance:
+
+              Sigma = np.diag(np.exp(var_output_flat))
+              J = np.diag(1 / np.exp(var_output_flat))
+            else:
+              Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
+              J = psd_solve(Sigma, np.eye(self.z_dim))
+
+            h = J @ mu
 
             return Sigma, mu, J, h
 
-        if y.ndim == 1:
-            Sigma, mu, J, h = get_natural_parameters(y)
-        elif y.ndim == 2:
-            Sigma, mu, J, h = vmap(get_natural_parameters)(y)
-        elif y.ndim == 3:
-            Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(y)
+        for dense, layer_norm in self.mlp:
+            
+            x = dense(x)
+            x = layer_norm(x)
+            x = nn.relu(x)
+
+        x = self.dense_out(x)
+
+        if x.ndim == 1:
+            Sigma, mu, J, h = get_natural_parameters(x)
+        elif x.ndim == 2:
+            Sigma, mu, J, h = vmap(get_natural_parameters)(x)
+        elif x.ndim == 3:
+            Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
 
         return {'Sigma': Sigma, 'mu': mu, 'J': J, 'h': h}
 
@@ -310,12 +313,9 @@ class GRU_RPM(nn.Module):
             mu, var_output_flat = np.split(x, [self.z_dim])
 
             if self.diagonal_covariance:
-
               Sigma = np.diag(np.exp(var_output_flat))
               J = np.diag(1 / np.exp(var_output_flat))
-
             else:
-
               Sigma = construct_covariance_matrix(var_output_flat, self.z_dim)
               J = psd_solve(Sigma, np.eye(self.z_dim))
 
@@ -328,7 +328,6 @@ class GRU_RPM(nn.Module):
         # x = self.LN_1(self.dense_1(np.concatenate((carry[None].repeat(x.shape[0], axis=0), x), axis=2)))
 
         for dense, layer_norm in self.mlp:
-            
             x = dense(x)
             x = layer_norm(x)
             x = nn.relu(x)
@@ -384,7 +383,10 @@ class delta_q_params(nn.Module):
 
         x = self.dense_out(x)
 
-        Sigma, mu, J, h = vmap(get_natural_parameters)(x)
+        if y.ndim == 2:
+          Sigma, mu, J, h = vmap(get_natural_parameters)(x)
+        elif y.ndim == 3:
+          Sigma, mu, J, h = vmap(vmap(get_natural_parameters))(x)
 
         return {'Sigma': Sigma, 'mu': mu, 'smoothed_covariances': Sigma, 'smoothed_means': mu, 'J': J, 'h': h}
 
