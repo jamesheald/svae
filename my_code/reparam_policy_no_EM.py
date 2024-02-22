@@ -173,12 +173,12 @@ carry_dim_GRU_RPM = 50
 prior_lr = 1e-3
 learning_rate = 1e-3
 max_grad_norm = 10
-n_epochs = 5000
+n_epochs = 1000
 log_every = 250
 
 options = {}
 options['normalise_y'] = True
-options['diagonal_covariance_RPM'] = True # setting this to True seems critical for good results
+options['diagonal_covariance_RPM'] = True # setting this to True speeds things up a lot
 options['diagonal_covariance_q_potentials'] = True
 options['embed_u'] = False
 options['f_time_dependent'] = False
@@ -256,8 +256,6 @@ delta_q_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_globa
 prior_opt = opt.chain(opt.adam(learning_rate=prior_lr), opt.clip_by_global_norm(max_grad_norm))
 u_emb_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
 
-# optimiser = optax.MultiSteps(optimiser, every_k_schedule = args.gradient_accumulate_every)
-
 all_optimisers = (rpm_opt, delta_q_opt, prior_opt, u_emb_opt)
 all_params = (params["rpm_params"], params["delta_q_params"], params["prior_params"], params["u_emb_params"])
 all_models = (RPM, delta_q, RPM, u_emb)
@@ -269,11 +267,35 @@ train_step_jit = jit(partial(train_step, options=options))
 
 get_RPM_factors_jit = jit(partial(get_RPM_factors, options=options))
 
+
+
+train_datagen = iter(tfds.as_numpy(train_dataset))
+
+y_batch, u_batch, gt_mu_batch = next(train_datagen)
+
+beta = beta_schedule(0)
+
+loss, (kl_qp, ce_qf, ce_qF, mu) = get_free_energy(params, opt_states, y_batch, u_batch, key, beta, options)
+
+mu_no_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3]*0.)
+mu_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3])
+
+RPM, _ = get_RPM_factors_jit(params, opt_states, y_batch[:3])
+
+R2, projected_mu = R2_inferred_vs_actual_z(mu['smoothed_means'], gt_mu_batch)
+
+log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y_batch[:3], mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, projected_mu, RPM['mu'], gt_mu_batch, options)
+
+
+
+print("log mean metrics over all batches, not just last batch of epoch")
 print("pass params around via opt_states not separately")
+
+
+
 
 n_batches_train = len(train_dataset)
 pbar = trange(n_epochs)
-R2 = 0.
 for itr in pbar:
 
     subkey, key = random.split(key, 2)
@@ -297,7 +319,7 @@ for itr in pbar:
 
         pbar.set_description("train loss: {:.3f},  kl_qp: {:.3f}, ce_qf: {:.3f}, ce_qF: {:.3f}, R2 train states: {:.3f}".format(loss, kl_qp.mean(), ce_qf.mean(), ce_qF.mean(), R2))
 
-    if itr % log_every == 0:
+    if (itr + 1) % log_every == 0:
 
         mu_no_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3]*0.)
         mu_u = batch_get_prior_marginal_means_jit(params['prior_params'], u[:3])
@@ -306,6 +328,6 @@ for itr in pbar:
 
         R2, projected_mu = R2_inferred_vs_actual_z(mu, gt_mu_batch)
 
-        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, true_z[:3], y[:3], mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, projected_mu, RPM['mu'], gt_mu_batch, options)
+        log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y_batch, mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, projected_mu, RPM['mu'], gt_mu_batch, options)
 
 breakpoint()

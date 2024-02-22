@@ -885,7 +885,7 @@ def get_group_name(options):
     return group_name
 
 # log to https://wandb.ai/james-gatsby/projects
-def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, z, y, mu1, gt_mu1, mu2, gt_mu2, projected_mu3, rpm_mu3, gt_mu3, options):
+def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y, mu1, gt_mu1, mu2, gt_mu2, projected_mu3, rpm_mu3, gt_mu3, options):
   
     group_name = get_group_name(options)
 
@@ -894,80 +894,46 @@ def log_to_wandb(loss, kl_qp, ce_qf, ce_qF, z, y, mu1, gt_mu1, mu2, gt_mu2, proj
     D = mu1.shape[-1]
     palette = sns.color_palette(None, D)
 
+    _, projected_mu1 = R2_inferred_vs_actual_z(mu1, gt_mu1)
+    _, projected_mu2 = R2_inferred_vs_actual_z(mu2, gt_mu2)
+
     f1 = plt.figure(1)
-    # plt.suptitle('observations')
+
     n_rows = 3
-    n_cols = 2
+    n_cols = 4
+
     cnt = 1
     for row in range(n_rows):
         for col in range(n_cols):
-            plt.subplot(n_rows, n_cols, cnt)
+            plt.subplot(n_rows, n_cols, cnt)#.set_title('title')
             for d in range(D):
                 if col == 0:
                     plt.plot(y[row,:,d],'o', c=palette[d], markersize=4)
                     plt.ylabel('y')
-                else:
-                    plt.plot(z[row,:,d],'-', c=palette[d])
-                    plt.ylabel('z')
-            cnt += 1
-
-    f2 = plt.figure(2)
-    _, projected_mu1 = R2_inferred_vs_actual_z(mu1, gt_mu1)
-    n_cols = 2
-    cnt = 1
-    for row in range(n_rows):
-        for col in range(n_cols):
-            plt.subplot(n_rows, n_cols, cnt).set_title('title')
-            for d in range(D):
-                if col == 0:
-                    plt.plot(gt_mu1[row,:,d], c=palette[d])
+                    # plt.plot(z[row,:,d],'-', c=palette[d], linewidth=3)
+                    # plt.ylabel('z')
                     # if row == 0:
                         # ax.set_title("true model")
                 if col == 1:
-                    plt.plot(projected_mu1[row,:,d], c=palette[d])
+                    plt.plot(gt_mu1[row,:,d], c=palette[d], linewidth=8, alpha = 0.35)
+                    plt.plot(projected_mu1[row,:,d], c=palette[d], linewidth=3)
+                    plt.ylabel('p(z|u=0)')
+                    # if row == 0:
+                        # ax.set_title("true model")
+                if col == 2:
+                    plt.plot(gt_mu2[row,:,d], c=palette[d], linewidth=8, alpha = 0.35)
+                    plt.plot(projected_mu2[row,:,d], c=palette[d], linewidth=3)
+                    plt.ylabel('p(z|u)')
                     # if row == 0:
                         # ax.set_title("learned model")
-            cnt += 1
-
-    f3 = plt.figure(3)
-    _, projected_mu2 = R2_inferred_vs_actual_z(mu2, gt_mu2)
-    cnt = 1
-    for row in range(n_rows):
-        for col in range(n_cols):
-            ax = plt.subplot(n_rows, n_cols, cnt)
-            for d in range(D):
-                if col == 0:
-                    plt.plot(gt_mu2[row,:,d], c=palette[d])
-                    # if row == 0:
-                    #     ax.set_title("true model")
-                if col == 1:
-                    plt.plot(projected_mu2[row,:,d], c=palette[d])
-                    # if row == 0:
-                    #     ax.set_title("learned model")
-            cnt += 1
-    
-    f4 = plt.figure(4)
-    n_cols = 3
-    cnt = 1
-    for row in range(n_rows):
-        for col in range(n_cols):
-            ax = plt.subplot(n_rows, n_cols, cnt)
-            for d in range(D):
-                if col == 0:
-                    plt.plot(gt_mu3[row,:,d], c=palette[d])
-                    # if row == 0:
-                    #     ax.set_title("true model")
-                if col == 1:
-                    plt.plot(projected_mu3[row,:,d], c=palette[d])
-                    # if row == 0:
-                    #     ax.set_title("q distribution")
-                if col == 2:
-                    plt.plot(rpm_mu3[row,:,d], c=palette[d])
-                    # if row == 0:
-                    #     ax.set_title("rpm factors")
+                if col == 3:
+                    plt.plot(gt_mu3[row,:,d], c=palette[d], linewidth=8, alpha = 0.35)
+                    plt.plot(projected_mu3[row,:,d], c=palette[d], linewidth=3)
+                    # plt.plot(rpm_mu3[row,:,d], '--', c=palette[d], linewidth=2)
+                    plt.ylabel('p(z|y,u)')
             cnt += 1
 
     to_log = { "ELBO": -loss.mean(), "KL_qp": kl_qp.mean(), "CE_qf": ce_qf.mean(), "CE_qF": ce_qF.mean(), "CE_qf - CE_qF": (ce_qf - ce_qF).mean(),\
-               "1) y and z": f1, "2) p(z|u=0)": f2, "3) p(z|u)": f3, "4) p(z|y,u)": f4}
+               "RPM": f1}
 
     wandb.log(to_log)
