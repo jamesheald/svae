@@ -205,10 +205,11 @@ class GRUCell_LN_NoInput(nn.RNNCellBase):
 class control_network(nn.Module):
     u_emb_dim: int
     h_dims: List
+    layer_norm: bool
 
     def setup(self):
 
-      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] if self.layer_norm else [nn.Dense(features=h_dim), lambda x: x] for h_dim in self.h_dims]
 
       self.dense_out = nn.Dense(features=self.u_emb_dim)
 
@@ -239,10 +240,11 @@ class emission_potential(nn.Module):
     z_dim: int
     h_dims: int
     diagonal_covariance: bool
+    layer_norm: bool
 
     def setup(self):
 
-      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+      self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] if self.layer_norm else [nn.Dense(features=h_dim), lambda x: x] for h_dim in self.h_dims]
 
       if self.diagonal_covariance:
         self.dense_out = nn.Dense(features=self.z_dim * 2)
@@ -291,6 +293,7 @@ class GRU_RPM(nn.Module):
     z_dim: int
     T: int
     diagonal_covariance: bool
+    layer_norm: bool
 
     def setup(self):
         
@@ -299,7 +302,7 @@ class GRU_RPM(nn.Module):
 
         self.carry_init = self.param('carry_init', lambda rng, shape: nn.initializers.normal(1.0)(rng, shape), (self.carry_dim,))
 
-        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] if self.layer_norm else [nn.Dense(features=h_dim), lambda x: x] for h_dim in self.h_dims]
 
         if self.diagonal_covariance:
           self.dense_out = nn.Dense(features=self.z_dim * 2)
@@ -343,13 +346,14 @@ class delta_q_params(nn.Module):
     h_dims: List
     z_dim: int
     diagonal_covariance: bool
+    layer_norm: bool
 
     def setup(self):
         
         # self.BiGRU = nn.Bidirectional(nn.RNN(nn.GRUCell(self.carry_dim)), nn.RNN(nn.GRUCell(self.carry_dim)))
         self.BiGRU = nn.Bidirectional(nn.RNN(GRUCell_LN(self.carry_dim)), nn.RNN(GRUCell_LN(self.carry_dim)))
 
-        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] for h_dim in self.h_dims]
+        self.mlp = [[nn.Dense(features=h_dim), nn.LayerNorm()] if self.layer_norm else [nn.Dense(features=h_dim), lambda x: x] for h_dim in self.h_dims]
 
         if self.diagonal_covariance:
           self.dense_out = nn.Dense(self.z_dim * 2)

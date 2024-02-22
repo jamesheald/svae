@@ -180,6 +180,9 @@ options = {}
 options['normalise_y'] = True
 options['diagonal_covariance_RPM'] = True # setting this to True speeds things up a lot
 options['diagonal_covariance_q_potentials'] = True
+options['layer_norm_RPM'] = True
+options['layer_norm_q_potentials'] = True
+options['layer_norm_control'] = True
 options['embed_u'] = False
 options['f_time_dependent'] = False
 options['initialise_via_M_step'] = False
@@ -229,9 +232,9 @@ if options['normalise_y']:
 train_dataset, validate_dataset = create_tf_dataset(y, u, gt_smoothed['smoothed_means'], options)
 
 # RPM = rpm_network(z_dim=D, h_dim=h_dim_rpm)
-RPM = GRU_RPM(carry_dim=carry_dim_GRU_RPM, h_dims=h_dims_rpm, z_dim=D, T=T, diagonal_covariance=options['diagonal_covariance_RPM'])
+RPM = GRU_RPM(carry_dim=carry_dim_GRU_RPM, h_dims=h_dims_rpm, z_dim=D, T=T, diagonal_covariance=options['diagonal_covariance_RPM'], layer_norm=options['layer_norm_RPM'])
 # delta_q = delta_q_params(carry_dim=carry_dim, h_dims=[], z_dim=D, diagonal_covariance=options['diagonal_covariance_q_potentials'])
-delta_q = emission_potential(z_dim=D, h_dims=h_dims_q, diagonal_covariance=options['diagonal_covariance_q_potentials'])
+delta_q = emission_potential(z_dim=D, h_dims=h_dims_q, diagonal_covariance=options['diagonal_covariance_q_potentials'], layer_norm=options['layer_norm_q_potentials'])
 # delta_q = rpm_network(h_dim=h_dim_rpm, z_dim=D)
 params = {}
 if options['f_time_dependent']:
@@ -248,7 +251,7 @@ if options['initialise_via_M_step']:
 else:
     params["prior_params"] = initialise_LDS_params(D, U, subkey2, closed_form_M_Step=False)
 
-u_emb = control_network(u_emb_dim=U, h_dims=h_dims_u_emb)
+u_emb = control_network(u_emb_dim=U, h_dims=h_dims_u_emb, layer_norm=options['layer_norm_control'])
 params["u_emb_params"] = u_emb.init(u = np.ones((U,)), rngs = {'params': subkey5})
 
 rpm_opt = opt.chain(opt.adam(learning_rate=learning_rate), opt.clip_by_global_norm(max_grad_norm))
@@ -269,6 +272,13 @@ get_RPM_factors_jit = jit(partial(get_RPM_factors, options=options))
 
 
 
+
+
+
+
+
+
+
 train_datagen = iter(tfds.as_numpy(train_dataset))
 
 y_batch, u_batch, gt_mu_batch = next(train_datagen)
@@ -285,6 +295,11 @@ RPM, _ = get_RPM_factors_jit(params, opt_states, y_batch[:3])
 R2, projected_mu = R2_inferred_vs_actual_z(mu['smoothed_means'], gt_mu_batch)
 
 log_to_wandb(loss, kl_qp, ce_qf, ce_qF, y_batch[:3], mu_no_u, gt_mu_no_u, mu_u, gt_mu_u, projected_mu, RPM['mu'], gt_mu_batch, options)
+
+
+
+
+
 
 
 
