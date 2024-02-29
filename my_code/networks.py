@@ -238,7 +238,7 @@ class control_network(nn.Module):
 
 class emission_potential(nn.Module):
     z_dim: int
-    h_dims: int
+    h_dims: List
     diagonal_covariance: bool
     layer_norm: bool
 
